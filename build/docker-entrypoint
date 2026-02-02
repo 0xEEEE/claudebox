@@ -20,8 +20,9 @@ while [[ $# -gt 0 ]]; do
         *) new_args+=("$1"); shift ;;
     esac
 done
+# Bash 3.2 safe array expansion
 if [[ ${#new_args[@]} -gt 0 ]]; then
-    set -- "${new_args[@]}"
+    set -- ${new_args[@]+"${new_args[@]}"}
 else
     set --
 fi
@@ -41,9 +42,13 @@ if [ -f /home/DOCKERUSER/init-firewall ]; then
 fi
 
 # Handle sudo access based on --enable-sudo flag
-# Note: DOCKERUSER user already has sudoers entry from Dockerfile
-if [ "$ENABLE_SUDO" != "true" ]; then
-    # Remove sudo access if --enable-sudo wasn't passed
+# Sudoers entry is created ONLY at runtime when explicitly requested
+if [ "$ENABLE_SUDO" = "true" ]; then
+    # Create sudoers entry only when --enable-sudo is passed
+    echo "DOCKERUSER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/DOCKERUSER
+    chmod 0440 /etc/sudoers.d/DOCKERUSER
+else
+    # Ensure no sudo access exists (defense in depth)
     rm -f /etc/sudoers.d/DOCKERUSER
 fi
 
@@ -76,21 +81,32 @@ if [ -n "${CLAUDEBOX_PROJECT_NAME:-}" ]; then
                 # Try to acquire lock for recreating corrupted venv
                 if runuser -u DOCKERUSER -- mkdir -p "$(dirname "$VENV_FLAG")" && runuser -u DOCKERUSER -- mkdir "$VENV_FLAG.lock" 2>/dev/null; then
                     # We got the lock, recreate venv with --clear
-                    PATH="/home/DOCKERUSER/.local/bin:$PATH" runuser -u DOCKERUSER -- uv venv --python-preference managed --clear "$VENV_DIR" || true
-                    
+                    echo "[entrypoint] Recreating venv (incomplete previous run detected)..." >&2
+                    PATH="/home/DOCKERUSER/.local/bin:$PATH" runuser -u DOCKERUSER -- uv venv --python-preference managed --clear "$VENV_DIR" || {
+                        echo "[entrypoint] ERROR: Failed to recreate venv" >&2
+                    }
+
                     # Remove lock and create flag to indicate completion
                     runuser -u DOCKERUSER -- rmdir "$VENV_FLAG.lock"
                     runuser -u DOCKERUSER -- touch "$VENV_FLAG"
                 else
-                    # Someone else is fixing it, wait for completion
-                    local wait_count=0
-                    while [ ! -f "$VENV_FLAG" ] && [ $wait_count -lt 60 ]; do
-                        sleep 0.5
-                        ((wait_count++)) || true
+                    # Someone else is fixing it, wait for completion with exponential backoff
+                    wait_count=0
+                    wait_interval=0.5
+                    max_wait=30  # seconds
+                    total_wait=0
+                    while [ ! -f "$VENV_FLAG" ] && [ "$total_wait" -lt "$max_wait" ]; do
+                        sleep "$wait_interval"
+                        total_wait=$((total_wait + 1))
+                        # Simple backoff: increase interval after 10 attempts
+                        if [ "$total_wait" -eq 10 ]; then
+                            wait_interval=1
+                        fi
                     done
-                    
+
                     if [ ! -f "$VENV_FLAG" ]; then
-                        echo "Warning: Timeout waiting for venv recreation" >&2
+                        echo "[entrypoint] ERROR: Timeout (${max_wait}s) waiting for venv recreation" >&2
+                        echo "[entrypoint] Continuing without venv - some features may not work" >&2
                     fi
                 fi
             else
@@ -98,23 +114,34 @@ if [ -n "${CLAUDEBOX_PROJECT_NAME:-}" ]; then
                 if runuser -u DOCKERUSER -- mkdir -p "$(dirname "$VENV_FLAG")" && runuser -u DOCKERUSER -- mkdir "$VENV_FLAG.lock" 2>/dev/null; then
                     # We got the lock, create venv if needed
                     if [ ! -d "$VENV_DIR" ]; then
-                        PATH="/home/DOCKERUSER/.local/bin:$PATH" runuser -u DOCKERUSER -- uv venv --python-preference managed "$VENV_DIR" || true
+                        echo "[entrypoint] Creating Python venv..." >&2
+                        PATH="/home/DOCKERUSER/.local/bin:$PATH" runuser -u DOCKERUSER -- uv venv --python-preference managed "$VENV_DIR" || {
+                            echo "[entrypoint] ERROR: Failed to create venv" >&2
+                        }
                     fi
-                    
+
                     # Remove lock and create flag to indicate completion
                     runuser -u DOCKERUSER -- rmdir "$VENV_FLAG.lock"
                     runuser -u DOCKERUSER -- touch "$VENV_FLAG"
                 else
-                    # Someone else is creating it, wait for completion flag
-                    local wait_count=0
-                    while [ ! -f "$VENV_FLAG" ] && [ $wait_count -lt 60 ]; do
-                        sleep 0.5
-                        ((wait_count++)) || true
+                    # Someone else is creating it, wait for completion with exponential backoff
+                    wait_count=0
+                    wait_interval=0.5
+                    max_wait=30  # seconds
+                    total_wait=0
+                    while [ ! -f "$VENV_FLAG" ] && [ "$total_wait" -lt "$max_wait" ]; do
+                        sleep "$wait_interval"
+                        total_wait=$((total_wait + 1))
+                        # Simple backoff: increase interval after 10 attempts
+                        if [ "$total_wait" -eq 10 ]; then
+                            wait_interval=1
+                        fi
                     done
-                    
+
                     # If still no flag after timeout, something went wrong
                     if [ ! -f "$VENV_FLAG" ]; then
-                        echo "Warning: Timeout waiting for venv creation" >&2
+                        echo "[entrypoint] ERROR: Timeout (${max_wait}s) waiting for venv creation" >&2
+                        echo "[entrypoint] Continuing without venv - some features may not work" >&2
                     fi
                 fi
             fi
@@ -138,33 +165,36 @@ if [ -n "${CLAUDEBOX_PROJECT_NAME:-}" ]; then
         if [ -f "$CONFIG_FILE" ] && grep -qE 'python|ml|datascience' "$CONFIG_FILE"; then
             if [ ! -f "$PYDEV_FLAG" ] && [ -f "$VENV_FLAG" ] && [ -d "$VENV_DIR" ]; then
                 # Deploy Python dev tools based on profile
-                local python_packages=""
-                
+                python_packages=""
+
                 # Base Python profile packages
                 if grep -q 'python' "$CONFIG_FILE"; then
                     python_packages="ipython black mypy pylint pytest ruff poetry pipenv"
                 fi
-                
+
                 # ML profile packages
                 if grep -q 'ml' "$CONFIG_FILE"; then
                     python_packages="$python_packages torch transformers scikit-learn numpy pandas matplotlib"
                 fi
-                
+
                 # Data science profile packages
                 if grep -q 'datascience' "$CONFIG_FILE"; then
                     python_packages="$python_packages jupyter notebook jupyterlab numpy pandas scipy matplotlib seaborn scikit-learn statsmodels plotly"
                 fi
-                
-                # Remove duplicates and install
+
+                # Install packages if any are specified
                 if [ -n "$python_packages" ]; then
-                    PATH="/home/DOCKERUSER/.local/bin:$PATH" runuser -u DOCKERUSER -- bash -c "
-                        source $VENV_DIR/bin/activate
+                    echo "[entrypoint] Installing Python dev tools..." >&2
+                    # Note: $python_packages is intentionally unquoted to allow word splitting for pip
+                    if PATH="/home/DOCKERUSER/.local/bin:$PATH" runuser -u DOCKERUSER -- bash -c "
+                        source \"$VENV_DIR/bin/activate\"
                         uv pip install $python_packages
-                    " || true
-                    
-                    # Create .pydev_flag to indicate Python dev tools are deployed
-                    if [ $? -eq 0 ]; then
+                    "; then
+                        # Create .pydev_flag to indicate Python dev tools are deployed
                         runuser -u DOCKERUSER -- touch "$PYDEV_FLAG"
+                        echo "[entrypoint] Python dev tools installed successfully" >&2
+                    else
+                        echo "[entrypoint] ERROR: Failed to install some Python packages" >&2
                     fi
                 fi
             fi
@@ -213,6 +243,132 @@ fi
 
 cd /home/DOCKERUSER
 
+# Initialize SSH configuration with safe defaults
+# Security: Never mount host's ~/.ssh - only use SSH agent socket
+# This creates a minimal SSH config with GitHub's host keys
+if [ ! -d "/home/DOCKERUSER/.ssh" ]; then
+    runuser -u DOCKERUSER -- mkdir -p "/home/DOCKERUSER/.ssh"
+    runuser -u DOCKERUSER -- chmod 700 "/home/DOCKERUSER/.ssh"
+fi
+
+if [ ! -f "/home/DOCKERUSER/.ssh/config" ]; then
+    runuser -u DOCKERUSER -- tee "/home/DOCKERUSER/.ssh/config" > /dev/null << 'SSHCONFIG'
+# ClaudeBox default SSH configuration
+# Only GitHub is configured by default for security
+
+Host github.com
+    HostName github.com
+    User git
+    IdentitiesOnly yes
+    AddKeysToAgent yes
+
+Host gist.github.com
+    HostName gist.github.com
+    User git
+    IdentitiesOnly yes
+    AddKeysToAgent yes
+SSHCONFIG
+    runuser -u DOCKERUSER -- chmod 600 "/home/DOCKERUSER/.ssh/config"
+fi
+
+# Add GitHub's SSH host keys to known_hosts (prevents MITM warnings)
+if [ ! -f "/home/DOCKERUSER/.ssh/known_hosts" ]; then
+    runuser -u DOCKERUSER -- tee "/home/DOCKERUSER/.ssh/known_hosts" > /dev/null << 'KNOWNHOSTS'
+# GitHub's SSH host keys (from https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints)
+github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
+KNOWNHOSTS
+    runuser -u DOCKERUSER -- chmod 600 "/home/DOCKERUSER/.ssh/known_hosts"
+fi
+
+# Set up host skills symlinks (applies to both shell and claude modes)
+# This is done as root before switching to user
+if [ "${CLAUDEBOX_HOST_SKILLS:-false}" = "true" ] && [ -d "/mnt/host-skills" ]; then
+    # Ensure ~/.claude/skills exists
+    runuser -u DOCKERUSER -- mkdir -p "/home/DOCKERUSER/.claude/skills"
+
+    # Security fix: Use atomic symlink creation to prevent TOCTOU race condition
+    # Create symlink with temp name, then atomically rename
+    create_symlink_safe() {
+        local source="$1"
+        local target="$2"
+        local temp_link="${target}.tmp.$$"
+
+        # Only create if target doesn't exist
+        if [ -e "$target" ] || [ -L "$target" ]; then
+            return 0
+        fi
+
+        # Create temp symlink and atomically rename
+        if runuser -u DOCKERUSER -- ln -s "$source" "$temp_link" 2>/dev/null; then
+            if ! runuser -u DOCKERUSER -- mv -n "$temp_link" "$target" 2>/dev/null; then
+                # mv -n failed (target appeared), clean up
+                rm -f "$temp_link"
+            fi
+        fi
+    }
+
+    # Also ensure project skills are linked first (they take priority)
+    if [ -d "/home/DOCKERUSER/.claudebox/skills" ]; then
+        for skill in /home/DOCKERUSER/.claudebox/skills/*.md; do
+            [ -f "$skill" ] || continue
+            skill_name=$(basename "$skill")
+            target="/home/DOCKERUSER/.claude/skills/$skill_name"
+            create_symlink_safe "$skill" "$target"
+        done
+    fi
+
+    # Then link host skills (lower priority - skips existing)
+    for skill in /mnt/host-skills/*.md; do
+        [ -f "$skill" ] || continue
+        skill_name=$(basename "$skill")
+        target="/home/DOCKERUSER/.claude/skills/$skill_name"
+        create_symlink_safe "$skill" "$target"
+    done
+fi
+
+# Set up host plugins symlinks for LSP and other plugin access
+# This allows Claude Code to use plugins installed on the host
+if [ "${CLAUDEBOX_HOST_LSP:-false}" = "true" ] && [ -d "/mnt/host-plugins" ]; then
+    # Symlink the entire plugins directory if it doesn't exist
+    if [ ! -e "/home/DOCKERUSER/.claude/plugins" ]; then
+        runuser -u DOCKERUSER -- mkdir -p "/home/DOCKERUSER/.claude"
+        # Security fix: Use atomic symlink creation
+        temp_link="/home/DOCKERUSER/.claude/plugins.tmp.$$"
+        if runuser -u DOCKERUSER -- ln -s "/mnt/host-plugins" "$temp_link" 2>/dev/null; then
+            runuser -u DOCKERUSER -- mv -n "$temp_link" "/home/DOCKERUSER/.claude/plugins" 2>/dev/null || rm -f "$temp_link"
+        fi
+    elif [ -d "/home/DOCKERUSER/.claude/plugins" ] && [ ! -L "/home/DOCKERUSER/.claude/plugins" ]; then
+        # If plugins dir exists but is not a symlink, merge by symlinking cache contents
+        if [ -d "/mnt/host-plugins/cache" ]; then
+            runuser -u DOCKERUSER -- mkdir -p "/home/DOCKERUSER/.claude/plugins/cache"
+            for plugin_dir in /mnt/host-plugins/cache/*/; do
+                [ -d "$plugin_dir" ] || continue
+                plugin_name=$(basename "$plugin_dir")
+                target="/home/DOCKERUSER/.claude/plugins/cache/$plugin_name"
+                create_symlink_safe "$plugin_dir" "$target"
+            done
+        fi
+    fi
+fi
+
+# Set up bundled claudebox plugins (e.g., ty-lsp)
+# These are plugins that ship with claudebox
+if [ "${CLAUDEBOX_BUNDLED_PLUGINS:-false}" = "true" ] && [ -d "/mnt/claudebox-plugins" ]; then
+    # Ensure plugins directory exists
+    runuser -u DOCKERUSER -- mkdir -p "/home/DOCKERUSER/.claude/plugins"
+
+    # Symlink each bundled plugin using safe atomic operation
+    for plugin_dir in /mnt/claudebox-plugins/*/; do
+        [ -d "$plugin_dir" ] || continue
+        plugin_name=$(basename "$plugin_dir")
+        target="/home/DOCKERUSER/.claude/plugins/$plugin_name"
+        # Only link if not already present (user plugins take priority)
+        create_symlink_safe "$plugin_dir" "$target"
+    done
+fi
+
 # No need for complex exit handlers - just copy after claude exits
 
 if [[ "${SHELL_MODE:-false}" == "true" ]]; then
@@ -232,10 +388,10 @@ exec /bin/zsh
 EOF
         chmod +x /tmp/tmux-init.sh
         sed -i "s|DOCKERUSER|$DOCKERUSER|g" /tmp/tmux-init.sh
-        exec runuser -u DOCKERUSER -- bash -c "source /home/DOCKERUSER/.nvm/nvm.sh && cd /workspace && exec tmux new-session /tmp/tmux-init.sh"
+        exec runuser -u DOCKERUSER -- bash -c "cd /workspace && exec tmux new-session /tmp/tmux-init.sh"
     else
         # For non-tmux, show logo before starting shell
-        exec runuser -u DOCKERUSER -- bash -c "source /home/DOCKERUSER/.nvm/nvm.sh && export PATH=\"/home/DOCKERUSER/.local/bin:\$PATH\" && [ -d /home/DOCKERUSER/.claudebox/.venv ] && export PATH=\"/home/DOCKERUSER/.claudebox/.venv/bin:\$PATH\" && export VIRTUAL_ENV=\"/home/DOCKERUSER/.claudebox/.venv\"; cd /workspace && source /home/DOCKERUSER/.claudebox/common.sh 2>/dev/null && logo_header 2>/dev/null; exec /bin/zsh"
+        exec runuser -u DOCKERUSER -- bash -c "export PATH=\"/home/DOCKERUSER/.local/bin:\$PATH\" && [ -d /home/DOCKERUSER/.claudebox/.venv ] && export PATH=\"/home/DOCKERUSER/.claudebox/.venv/bin:\$PATH\" && export VIRTUAL_ENV=\"/home/DOCKERUSER/.claudebox/.venv\"; cd /workspace && source /home/DOCKERUSER/.claudebox/common.sh 2>/dev/null && logo_header 2>/dev/null; exec /bin/zsh"
     fi
 else
     # Claude mode - handle wrapper logic directly here
@@ -243,32 +399,24 @@ else
         # Special update handling - pass all arguments
         shift  # Remove "update" from arguments
         exec runuser -u DOCKERUSER -- bash -c '
-            export NVM_DIR="$HOME/.nvm"
-            if [[ -s "$NVM_DIR/nvm.sh" ]]; then
-                \. "$NVM_DIR/nvm.sh"
-                nvm use default >/dev/null 2>&1 || {
-                    echo "Warning: Failed to activate default Node version" >&2
-                }
-            else
-                echo "Warning: NVM not found at $NVM_DIR" >&2
-            fi
-            
+            export PATH="$HOME/.local/bin:$PATH"
+
             cd /workspace
             echo "Running update command..."
-            
+
             # Check for stale update lock (older than 5 minutes)
-            lock_file="$HOME/.DOCKERUSER/.update.lock"
+            lock_file="$HOME/.claudebox/.update.lock"
             if [[ -f "$lock_file" ]]; then
                 lock_age=$(( $(date +%s) - $(stat -f %m "$lock_file" 2>/dev/null || stat -c %Y "$lock_file" 2>/dev/null || echo 0) ))
                 if [[ $lock_age -gt 300 ]]; then
                     rm -f "$lock_file"
                 fi
             fi
-            
+
             # Capture the output of claude update to check if already up to date
             update_output=$(claude update 2>&1)
             echo "$update_output"
-            
+
             # Only run version check if an actual update occurred
             if echo "$update_output" | grep -q "Successfully updated\|Installing update"; then
                 echo "Verifying update..."
@@ -278,48 +426,46 @@ else
     else
         # Regular DOCKERUSER execution
         exec runuser -u DOCKERUSER -- bash -c '
-            export NVM_DIR="$HOME/.nvm"
-            if [[ -s "$NVM_DIR/nvm.sh" ]]; then
-                \. "$NVM_DIR/nvm.sh"
-                nvm use default >/dev/null 2>&1 || {
-                    echo "Warning: Failed to activate default Node version" >&2
-                }
-            else
-                echo "Warning: NVM not found at $NVM_DIR" >&2
-            fi
-            
-            # tooling.md generation is handled in root section above
-            
-            # Ensure uv is in PATH
+            # Ensure uv and claude are in PATH
             export PATH="$HOME/.local/bin:$PATH"
+
+            # Security fix: Load API key from file instead of environment variable
+            # This prevents the key from being visible in docker inspect
+            if [[ -f "${ANTHROPIC_API_KEY_FILE:-}" ]]; then
+                export ANTHROPIC_API_KEY=$(cat "$ANTHROPIC_API_KEY_FILE")
+            fi
             
             # Activate Python venv if it exists
             if [ -f "$HOME/.claudebox/.venv/bin/activate" ]; then
                 source "$HOME/.claudebox/.venv/bin/activate"
             fi
             
-            # Create symlink from ~/.claude/commands to ~/.claudebox/commands
-            # The ~/.claudebox folder is mounted from the host
-            if [ -d "$HOME/.claudebox/commands" ]; then
-                if [ ! -e "$HOME/.claude/commands" ]; then
-                    ln -s "$HOME/.claudebox/commands" "$HOME/.claude/commands"
-                fi
-            fi
-            
+            # Note: Host skills and project commands are already symlinked
+            # at container startup (before this script runs as user)
+
             cd /workspace
-            
-            # Prepare MCP configuration arguments for native --mcp-config support
-            mcp_config_args=()
-            
-            # Add user MCP config if available (lower priority)
-            if [[ -f "/tmp/user-mcp-config.json" ]]; then
-                mcp_config_args+=(--mcp-config /tmp/user-mcp-config.json)
-                if [[ "${VERBOSE:-false}" == "true" ]]; then
-                    printf "Loading user MCP servers\n" >&2
-                fi
+
+            # Prepare plugin directory arguments for bundled plugins
+            plugin_args=()
+            if [ -d "/mnt/claudebox-plugins" ]; then
+                for plugin_dir in /mnt/claudebox-plugins/*/; do
+                    [ -d "$plugin_dir" ] || continue
+                    # Check if it has a valid plugin.json
+                    if [ -f "$plugin_dir/.claude-plugin/plugin.json" ]; then
+                        plugin_args+=(--plugin-dir "$plugin_dir")
+                        if [[ "${VERBOSE:-false}" == "true" ]]; then
+                            printf "Loading bundled plugin: %s\n" "$(basename "$plugin_dir")" >&2
+                        fi
+                    fi
+                done
             fi
-            
-            # Add project MCP config if available (higher priority - processed last)
+
+            # Prepare MCP configuration arguments for native --mcp-config support
+            # Security: Only project-level MCP configs are loaded (not host ~/.claude.json)
+            # Configure MCP servers in: .claude/settings.json or .claude/settings.local.json
+            mcp_config_args=()
+
+            # Add project MCP config if available
             if [[ -f "/tmp/project-mcp-config.json" ]]; then
                 mcp_config_args+=(--mcp-config /tmp/project-mcp-config.json)
                 if [[ "${VERBOSE:-false}" == "true" ]]; then
@@ -349,29 +495,38 @@ else
                 done
                 
                 # Update positional parameters
-                set -- "${filtered_args[@]}"
+                # Bash 3.2 safe array expansion
+                if [[ ${#filtered_args[@]} -gt 0 ]]; then
+                    set -- ${filtered_args[@]+"${filtered_args[@]}"}
+                else
+                    set --
+                fi
             fi
             
             # If no arguments and stdin is a terminal, run claude in interactive mode
+            # Bash 3.2 safe array expansion for plugin_args and mcp_config_args
             if [[ "${CLAUDEBOX_WRAP_TMUX:-false}" == "true" ]]; then
                 if [[ $# -eq 0 ]] && [[ -t 0 ]]; then
-                    tmux new-session claude "${mcp_config_args[@]}"
+                    tmux new-session claude ${plugin_args[@]+"${plugin_args[@]}"} ${mcp_config_args[@]+"${mcp_config_args[@]}"}
                 else
-                    tmux new-session claude "${mcp_config_args[@]}" "$@"
+                    tmux new-session claude ${plugin_args[@]+"${plugin_args[@]}"} ${mcp_config_args[@]+"${mcp_config_args[@]}"} "$@"
                 fi
             else
                 if [[ $# -eq 0 ]] && [[ -t 0 ]]; then
-                    # No arguments - just run claude with MCP configs
-                    claude "${mcp_config_args[@]}"
+                    # No arguments - just run claude with plugins and MCP configs
+                    claude ${plugin_args[@]+"${plugin_args[@]}"} ${mcp_config_args[@]+"${mcp_config_args[@]}"}
                 else
-                    # Has arguments - pass them through with MCP configs
-                    claude "${mcp_config_args[@]}" "$@"
+                    # Has arguments - pass them through with plugins and MCP configs
+                    claude ${plugin_args[@]+"${plugin_args[@]}"} ${mcp_config_args[@]+"${mcp_config_args[@]}"} "$@"
                 fi
             fi
             
             # After claude exits, copy .claude.json if it was created
-            if [[ -f "$HOME/.claude.json" ]] && [[ ! -f "$HOME/.claudebox/${CLAUDEBOX_SLOT_NAME}/.claude.json" ]]; then
-                cp "$HOME/.claude.json" "$HOME/.claudebox/${CLAUDEBOX_SLOT_NAME}/.claude.json"
+            # Security fix: Validate CLAUDEBOX_SLOT_NAME to prevent path traversal
+            if [[ -n "${CLAUDEBOX_SLOT_NAME:-}" ]] && [[ "$CLAUDEBOX_SLOT_NAME" =~ ^[a-f0-9_-]+$ ]]; then
+                if [[ -f "$HOME/.claude.json" ]] && [[ ! -f "$HOME/.claudebox/${CLAUDEBOX_SLOT_NAME}/.claude.json" ]]; then
+                    cp "$HOME/.claude.json" "$HOME/.claudebox/${CLAUDEBOX_SLOT_NAME}/.claude.json"
+                fi
             fi
         ' -- "$@"
     fi
