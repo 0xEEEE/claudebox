@@ -142,6 +142,8 @@ show_help() {
         echo "  --verbose                        Show detailed output"
         echo "  --enable-sudo                    Enable sudo without password"
         echo "  --disable-firewall               Disable network restrictions"
+        echo "  --no-host-skills                 Disable host ~/.claude/skills access"
+        echo "  --no-host-lsp                    Disable host ~/.claude/plugins (LSP) access"
         echo
         echo "ClaudeBox Commands:"
         echo "$our_commands"
@@ -170,6 +172,8 @@ show_help() {
         echo "  --verbose                        Show detailed output"
         echo "  --enable-sudo                    Enable sudo without password"
         echo "  --disable-firewall               Disable network restrictions"
+        echo "  --no-host-skills                 Disable host ~/.claude/skills access"
+        echo "  --no-host-lsp                    Disable host ~/.claude/plugins (LSP) access"
         echo
         echo "Commands:"
         echo "$our_commands"
@@ -213,6 +217,8 @@ show_full_help() {
   --verbose                        Show detailed output\
   --enable-sudo                    Enable sudo without password\
   --disable-firewall               Disable network restrictions\
+  --no-host-skills                 Disable host ~/.claude/skills access\
+  --no-host-lsp                    Disable host ~/.claude/plugins (LSP) access\
 ' | \
             sed '$ a\
   profiles                        List all available profiles\

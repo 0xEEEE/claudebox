@@ -77,7 +77,8 @@ test_get_all_names() {
     eval "$PROFILE_FUNCS"
     local result=$(get_all_profile_names)
     local count=$(echo "$result" | wc -w)
-    [[ $count -eq 20 ]]
+    # 22 profiles: core build-tools shell networking bash c openwrt rust python go flutter javascript java ruby php database devops web embedded datascience security ml
+    [[ $count -eq 22 ]]
 }
 run_test "get_all_profile_names()" test_get_all_names
 

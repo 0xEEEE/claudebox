@@ -774,7 +774,7 @@ _cmd_special() {
     # For update command, show version after update
     if [[ "$cmd" == "update" ]]; then
         docker exec -u "$DOCKER_USER" "$temp_container" bash -c "
-            source \$HOME/.nvm/nvm.sh && nvm use default >/dev/null 2>&1 && claude --version
+            export PATH=\"\$HOME/.local/bin:\$PATH\" && claude --version
         " 2>/dev/null || true
     fi
 
