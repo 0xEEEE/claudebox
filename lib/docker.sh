@@ -94,7 +94,8 @@ run_claudebox_container() {
     # Handle "attached" mode - start detached, wait, then attach
     if [[ "$run_mode" == "attached" ]]; then
         # Start detached
-        run_claudebox_container "$container_name" "detached" "${container_args[@]}" >/dev/null
+        # Bash 3.2 safe array expansion
+        run_claudebox_container "$container_name" "detached" ${container_args[@]+"${container_args[@]}"} >/dev/null
         
         # Show progress while container initializes
         fillbar
@@ -196,7 +197,19 @@ run_claudebox_container() {
     fi
     
     # Mount the socket and directory if we have them
+    # Security fix: Validate socket directory permissions before mounting
     if [[ -n "$tmux_socket_dir" ]] && [[ -d "$tmux_socket_dir" ]]; then
+        # Check socket directory permissions
+        local socket_perms
+        if [[ "$HOST_OS" == "macOS" ]]; then
+            socket_perms=$(stat -f %A "$tmux_socket_dir" 2>/dev/null || echo "")
+        else
+            socket_perms=$(stat -c %a "$tmux_socket_dir" 2>/dev/null || echo "")
+        fi
+        # Warn if world-writable (last digit is 7 or has write bit)
+        if [[ -n "$socket_perms" ]] && [[ "${socket_perms: -1}" =~ [2367] ]]; then
+            echo "[SECURITY WARNING] Tmux socket directory has world-writable permissions: $tmux_socket_dir ($socket_perms)" >&2
+        fi
         # Always mount the socket directory
         docker_args+=(-v "$tmux_socket_dir:$tmux_socket_dir")
         if [[ "$VERBOSE" == "true" ]]; then
@@ -229,7 +242,22 @@ run_claudebox_container() {
     docker_args+=(-v "$PROJECT_SLOT_DIR/.claude":/home/$DOCKER_USER/.claude)
     
     # Mount .claude.json only if it already exists (from previous session)
+    # Security fix: Validate file permissions before mounting
     if [[ -f "$PROJECT_SLOT_DIR/.claude.json" ]]; then
+        # Check and fix permissions if world-readable
+        local file_perms
+        if [[ "$HOST_OS" == "macOS" ]]; then
+            file_perms=$(stat -f %A "$PROJECT_SLOT_DIR/.claude.json" 2>/dev/null || echo "")
+        else
+            file_perms=$(stat -c %a "$PROJECT_SLOT_DIR/.claude.json" 2>/dev/null || echo "")
+        fi
+        # If permissions allow group/other read, fix them
+        if [[ -n "$file_perms" ]] && [[ ! "$file_perms" =~ ^[67]00$ ]]; then
+            chmod 600 "$PROJECT_SLOT_DIR/.claude.json" 2>/dev/null || true
+            if [[ "$VERBOSE" == "true" ]]; then
+                echo "[DEBUG] Fixed .claude.json permissions (was $file_perms, now 600)" >&2
+            fi
+        fi
         docker_args+=(-v "$PROJECT_SLOT_DIR/.claude.json":/home/$DOCKER_USER/.claude.json)
     fi
     
@@ -239,9 +267,78 @@ run_claudebox_container() {
     # Mount .cache directory
     docker_args+=(-v "$PROJECT_SLOT_DIR/.cache":/home/$DOCKER_USER/.cache)
     
-    # Mount SSH directory
-    docker_args+=(-v "$HOME/.ssh":"/home/$DOCKER_USER/.ssh:ro")
-    
+    # Mount SSH agent socket only - never mount host SSH directory or config
+    # Security: Private keys and host config never enter container
+    if [[ -n "${SSH_AUTH_SOCK:-}" ]] && [[ -S "$SSH_AUTH_SOCK" ]]; then
+        # Use SSH agent socket (keys stay on host, never enter container)
+        docker_args+=(-v "$SSH_AUTH_SOCK":/tmp/ssh-agent.sock:ro)
+        docker_args+=(-e "SSH_AUTH_SOCK=/tmp/ssh-agent.sock")
+        if [[ "$VERBOSE" == "true" ]]; then
+            echo "[DEBUG] Using SSH agent socket for authentication" >&2
+        fi
+    else
+        # No SSH agent available - warn user but don't mount sensitive directories
+        if [[ "$VERBOSE" == "true" ]]; then
+            echo "[DEBUG] SSH agent not available - SSH authentication disabled in container" >&2
+        fi
+    fi
+    # Note: SSH config is initialized in docker-entrypoint with safe defaults (GitHub only)
+    # Host's ~/.ssh/config is never mounted to prevent information leakage
+
+    # Mount host skills directory for layered skill access
+    # Default: enabled. Use --no-host-skills to disable
+    # Security fix: Check both container_args and CLI_CONTROL_FLAGS for control flags
+    # Bash 3.2 safe array expansion
+    local host_skills_enabled=true
+    for flag in ${container_args[@]+"${container_args[@]}"} ${CLI_CONTROL_FLAGS[@]+"${CLI_CONTROL_FLAGS[@]}"}; do
+        if [[ "$flag" == "--no-host-skills" ]]; then
+            host_skills_enabled=false
+            break
+        fi
+    done
+
+    if [[ "$host_skills_enabled" == "true" ]] && [[ -d "$HOME/.claude/skills" ]]; then
+        docker_args+=(-v "$HOME/.claude/skills":"/mnt/host-skills:ro")
+        docker_args+=(-e "CLAUDEBOX_HOST_SKILLS=true")
+        if [[ "$VERBOSE" == "true" ]]; then
+            echo "[DEBUG] Mounting host skills from ~/.claude/skills" >&2
+        fi
+    else
+        docker_args+=(-e "CLAUDEBOX_HOST_SKILLS=false")
+    fi
+
+    # Mount host plugins directory for LSP and other plugin access
+    # Default: enabled. Use --no-host-lsp to disable
+    # Security fix: Check both container_args and CLI_CONTROL_FLAGS for control flags
+    # Bash 3.2 safe array expansion
+    local host_lsp_enabled=true
+    for flag in ${container_args[@]+"${container_args[@]}"} ${CLI_CONTROL_FLAGS[@]+"${CLI_CONTROL_FLAGS[@]}"}; do
+        if [[ "$flag" == "--no-host-lsp" ]]; then
+            host_lsp_enabled=false
+            break
+        fi
+    done
+
+    if [[ "$host_lsp_enabled" == "true" ]] && [[ -d "$HOME/.claude/plugins" ]]; then
+        docker_args+=(-v "$HOME/.claude/plugins":"/mnt/host-plugins:ro")
+        docker_args+=(-e "CLAUDEBOX_HOST_LSP=true")
+        if [[ "$VERBOSE" == "true" ]]; then
+            echo "[DEBUG] Mounting host plugins from ~/.claude/plugins" >&2
+        fi
+    else
+        docker_args+=(-e "CLAUDEBOX_HOST_LSP=false")
+    fi
+
+    # Mount bundled claudebox plugins (e.g., ty-lsp)
+    local bundled_plugins_dir="${CLAUDEBOX_HOME:-$HOME/.claudebox}/source/plugins"
+    if [[ -d "$bundled_plugins_dir" ]]; then
+        docker_args+=(-v "$bundled_plugins_dir":"/mnt/claudebox-plugins:ro")
+        docker_args+=(-e "CLAUDEBOX_BUNDLED_PLUGINS=true")
+        if [[ "$VERBOSE" == "true" ]]; then
+            echo "[DEBUG] Mounting bundled plugins from $bundled_plugins_dir" >&2
+        fi
+    fi
+
     # Mount .env file if it exists in the project directory
     if [[ -f "$PROJECT_DIR/.env" ]]; then
         docker_args+=(-v "$PROJECT_DIR/.env":/workspace/.env:ro)
@@ -266,8 +363,10 @@ run_claudebox_container() {
         local config_file="$1"
         local temp_file="$2"
         
-        # Create temporary file with unique name
-        local mcp_file=$(mktemp /tmp/claudebox-mcp-$(date +%s)-$$.json 2>/dev/null || mktemp)
+        # Create temporary file with secure random name and restrictive permissions
+        # Security fix: Use random suffix instead of predictable timestamp+pid
+        local mcp_file=$(mktemp /tmp/claudebox-mcp-XXXXXXXXXXXXXX.json 2>/dev/null || mktemp)
+        chmod 600 "$mcp_file"
         mcp_temp_files+=("$mcp_file")
         
         # Extract mcpServers if they exist
@@ -287,53 +386,41 @@ run_claudebox_container() {
         fi
     }
     
-    local user_mcp_file=""
     local project_mcp_file=""
-    
+
     # Track all temporary MCP files for cleanup
     declare -a mcp_temp_files=()
-    
+
     # Set up cleanup trap for temporary MCP config files
+    # Bash 3.2 safe: check if variable exists AND array length before iteration
     cleanup_mcp_files() {
-        local file
-        for file in "${mcp_temp_files[@]}"; do
-            if [[ -f "$file" ]]; then
-                rm -f "$file"
-            fi
-        done
-        if [[ -n "$user_mcp_file" ]] && [[ -f "$user_mcp_file" ]]; then
-            rm -f "$user_mcp_file"
+        # Check if mcp_temp_files exists and has elements
+        if [[ -n "${mcp_temp_files+x}" ]] && [[ ${#mcp_temp_files[@]} -gt 0 ]]; then
+            local file
+            for file in "${mcp_temp_files[@]}"; do
+                if [[ -f "$file" ]]; then
+                    rm -f "$file"
+                fi
+            done
         fi
-        if [[ -n "$project_mcp_file" ]] && [[ -f "$project_mcp_file" ]]; then
+        # Check if project_mcp_file exists and is set
+        if [[ -n "${project_mcp_file+x}" ]] && [[ -n "$project_mcp_file" ]] && [[ -f "$project_mcp_file" ]]; then
             rm -f "$project_mcp_file"
         fi
     }
     trap cleanup_mcp_files EXIT
     
-    # Create user MCP config file from ~/.claude.json
-    if [[ -f "$HOME/.claude.json" ]]; then
-        user_mcp_file=$(create_mcp_config_file "$HOME/.claude.json" "")
-        
-        if [[ -n "$user_mcp_file" ]]; then
-            local user_count=$(jq '.mcpServers | length' "$user_mcp_file" 2>/dev/null || echo "0")
-            if [[ "$user_count" -gt 0 ]]; then
-                if [[ "$VERBOSE" == "true" ]]; then
-                    printf "Found %s user MCP servers\n" "$user_count" >&2
-                fi
-                docker_args+=(-v "$user_mcp_file":/tmp/user-mcp-config.json:ro)
-                if [[ "$VERBOSE" == "true" ]]; then
-                    echo "[DEBUG] Mounting user MCP configuration file" >&2
-                fi
-            else
-                rm -f "$user_mcp_file"
-                user_mcp_file=""
-            fi
-        fi
-    fi
-    
+    # Security: Do NOT read MCP config from host's ~/.claude.json
+    # This prevents exposing host MCP server credentials to the container
+    # MCP servers should be configured per-project in:
+    #   - $PROJECT_DIR/.claude/settings.json (shared, can be committed)
+    #   - $PROJECT_DIR/.claude/settings.local.json (local, add to .gitignore)
+
     # Create project MCP config file by merging project configs
     # Start with empty config file for merging
-    local temp_project_file=$(mktemp /tmp/claudebox-project-temp-$(date +%s)-$$.json 2>/dev/null || mktemp)
+    # Security fix: Use random suffix instead of predictable timestamp+pid
+    local temp_project_file=$(mktemp /tmp/claudebox-project-XXXXXXXXXXXXXX.json 2>/dev/null || mktemp)
+    chmod 600 "$temp_project_file"
     mcp_temp_files+=("$temp_project_file")
     echo '{"mcpServers":{}}' > "$temp_project_file"
     
@@ -381,9 +468,20 @@ run_claudebox_container() {
         slot_index=$(get_slot_index "$slot_name" "$PROJECT_PARENT_DIR" 2>/dev/null || echo "1")
     fi
     
+    # Security fix: Pass API key via file instead of environment variable
+    # Environment variables are visible in docker inspect and process listings
+    local api_key_file=""
+    if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+        api_key_file=$(mktemp /tmp/claudebox-apikey-XXXXXXXXXXXXXX 2>/dev/null || mktemp)
+        chmod 600 "$api_key_file"
+        printf '%s' "$ANTHROPIC_API_KEY" > "$api_key_file"
+        mcp_temp_files+=("$api_key_file")
+        docker_args+=(-v "$api_key_file":/tmp/.anthropic_api_key:ro)
+        docker_args+=(-e "ANTHROPIC_API_KEY_FILE=/tmp/.anthropic_api_key")
+    fi
+
     docker_args+=(
         -e "NODE_ENV=${NODE_ENV:-production}"
-        -e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}"
         -e "CLAUDEBOX_PROJECT_NAME=$project_name"
         -e "CLAUDEBOX_SLOT_NAME=$slot_name"
         -e "TERM=${TERM:-xterm-256color}"
@@ -393,19 +491,51 @@ run_claudebox_container() {
         -e "CLAUDEBOX_TMUX_PANE=${CLAUDEBOX_TMUX_PANE:-}"
         --cap-add NET_ADMIN
         --cap-add NET_RAW
+    )
+
+    # Security fix: Add resource limits to prevent DoS
+    # These can be overridden via environment variables
+    local memory_limit="${CLAUDEBOX_MEMORY_LIMIT:-8g}"
+    local cpu_limit="${CLAUDEBOX_CPU_LIMIT:-4}"
+    local pids_limit="${CLAUDEBOX_PIDS_LIMIT:-512}"
+
+    docker_args+=(
+        --memory "$memory_limit"
+        --cpus "$cpu_limit"
+        --pids-limit "$pids_limit"
+        --ulimit nofile=65536:65536
         "$IMAGE_NAME"
     )
     
     # Add any additional arguments
+    # Bash 3.2 safe array expansion
     if [[ ${#container_args[@]} -gt 0 ]]; then
-        docker_args+=("${container_args[@]}")
+        docker_args+=(${container_args[@]+"${container_args[@]}"})
     fi
     
     # Run the container
     if [[ "$VERBOSE" == "true" ]]; then
-        echo "[DEBUG] Docker run command: docker run ${docker_args[*]}" >&2
+        # Security fix: Sanitize sensitive information from debug output
+        local sanitized_args=()
+        local skip_next=false
+        # Bash 3.2 safe array expansion
+        for arg in ${docker_args[@]+"${docker_args[@]}"}; do
+            if [[ "$skip_next" == "true" ]]; then
+                sanitized_args+=("[REDACTED]")
+                skip_next=false
+            elif [[ "$arg" =~ ^-v.*apikey|^-v.*\.anthropic ]]; then
+                sanitized_args+=("-v [API_KEY_FILE]:...")
+            elif [[ "$arg" =~ ANTHROPIC_API_KEY|API_KEY|SECRET|PASSWORD|TOKEN ]]; then
+                sanitized_args+=("[REDACTED]")
+            else
+                sanitized_args+=("$arg")
+            fi
+        done
+        # Bash 3.2 safe array expansion
+        echo "[DEBUG] Docker run command: docker run ${sanitized_args[*]+${sanitized_args[*]}}" >&2
     fi
-    docker run "${docker_args[@]}"
+    # Bash 3.2 safe array expansion
+    docker run ${docker_args[@]+"${docker_args[@]}"}
     local exit_code=$?
     
     return $exit_code
@@ -445,7 +575,6 @@ run_docker_build() {
         --build-arg USER_ID="$USER_ID" \
         --build-arg GROUP_ID="$GROUP_ID" \
         --build-arg USERNAME="$DOCKER_USER" \
-        --build-arg NODE_VERSION="$NODE_VERSION" \
         --build-arg DELTA_VERSION="$DELTA_VERSION" \
         --build-arg REBUILD_TIMESTAMP="${CLAUDEBOX_REBUILD_TIMESTAMP:-}" \
         -f "$1" -t "$IMAGE_NAME" "$2" || error "Docker build failed"
