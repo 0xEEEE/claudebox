@@ -1,8 +1,15 @@
 FROM debian:bookworm
-ARG USER_ID GROUP_ID USERNAME NODE_VERSION DELTA_VERSION
+ARG USER_ID GROUP_ID USERNAME DELTA_VERSION
 ARG REBUILD_TIMESTAMP
 
 RUN echo '#!/bin/sh\nexit 101' > /usr/sbin/policy-rc.d && chmod +x /usr/sbin/policy-rc.d
+
+# Copy vendored system assets (GPG keys, .deb packages) for offline installation
+COPY vendor/scripts/base/system-assets /tmp/system-assets
+
+# Verify system assets checksums
+COPY vendor/scripts/checksums-system.sha256 /tmp/checksums-system.sha256
+RUN cd /tmp && sha256sum -c checksums-system.sha256
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -13,13 +20,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         apt-get install -y --no-autoremove --no-install-recommends ca-certificates curl locales gnupg && \
     echo "en_US.UTF-8 UTF-8" > /etc/locale.gen && locale-gen en_US.UTF-8 &&\
         mkdir -p /usr/share/keyrings && \
-        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /tmp/githubcli.gpg && \
-        cat /tmp/githubcli.gpg | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
-        rm -f /tmp/githubcli.gpg && \
+        cat /tmp/system-assets/githubcli-archive-keyring.gpg | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
     chmod 644 /usr/share/keyrings/githubcli-archive-keyring.gpg && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg]" \
     "https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && apt-get update && \
-        apt-get install -y --no-autoremove --no-install-recommends apt-utils wget zsh fzf ca-certificates sudo git tmux iptables ipset gh zip unzip jq \
+        apt-get install -y --no-autoremove --no-install-recommends apt-utils zsh fzf ca-certificates sudo git tmux iptables ipset gh zip unzip jq \
         procps vim nano less iputils-ping traceroute dnsutils netcat-openbsd net-tools xdg-utils
 
 ENV LANG=en_US.UTF-8 \
@@ -29,16 +34,27 @@ ENV LANG=en_US.UTF-8 \
 RUN groupadd -g $GROUP_ID $USERNAME || true && \
     useradd -m -u $USER_ID -g $GROUP_ID -s /bin/bash $USERNAME
 
+# Install git-delta from local .deb package (no network request)
 RUN ARCH=$(dpkg --print-architecture) && \
-    wget -q -O /tmp/git-delta_${DELTA_VERSION}_${ARCH}.deb \
-        https://github.com/dandavison/delta/releases/download/${DELTA_VERSION}/git-delta_${DELTA_VERSION}_${ARCH}.deb && \
-    dpkg -i /tmp/git-delta_${DELTA_VERSION}_${ARCH}.deb && \
-    rm /tmp/git-delta_${DELTA_VERSION}_${ARCH}.deb
+    dpkg -i /tmp/system-assets/git-delta_${DELTA_VERSION}_${ARCH}.deb && \
+    rm -rf /tmp/system-assets /tmp/checksums-system.sha256
 
 USER $USERNAME
 WORKDIR /home/$USERNAME
 
-RUN sh -c "$(wget -O- https://github.com/deluan/zsh-in-docker/releases/download/v1.2.0/zsh-in-docker.sh)" -- \
+# Supply chain security: Use vendored scripts instead of remote execution
+# See vendor/scripts/MANIFEST.md for audit information
+COPY --chown=$USERNAME vendor/scripts/base/zsh-setup-local.sh /tmp/zsh-setup-local.sh
+COPY --chown=$USERNAME vendor/scripts/base/zsh-assets /tmp/zsh-assets
+COPY --chown=$USERNAME vendor/scripts/base/uv-install.sh /tmp/uv-install.sh
+COPY --chown=$USERNAME vendor/scripts/base/claude-install.sh /tmp/claude-install.sh
+COPY --chown=$USERNAME vendor/scripts/checksums-base.sha256 /tmp/checksums-base.sha256
+
+# Verify checksums before execution
+RUN cd /tmp && sha256sum -c checksums-base.sha256 --ignore-missing
+
+# Install zsh with Oh-My-Zsh from local archives (no network requests)
+RUN sh /tmp/zsh-setup-local.sh \
     -p git \
     -p fzf \
     -a "source /usr/share/doc/fzf/examples/key-bindings.zsh" \
@@ -49,13 +65,9 @@ RUN sh -c "$(wget -O- https://github.com/deluan/zsh-in-docker/releases/download/
     -a 'setopt HIST_IGNORE_DUPS' \
     -a 'setopt SHARE_HISTORY' \
     -a 'setopt HIST_FCNTL_LOCK' \
-    -a 'setopt APPEND_HISTORY' \
-    -a 'export NVM_DIR="$HOME/.nvm"' \
-    -a '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"' \
-    -a '[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"' \
-    -x
+    -a 'setopt APPEND_HISTORY'
 
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+RUN sh /tmp/uv-install.sh
 
 RUN echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && \
     echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
@@ -72,26 +84,9 @@ ENV DEVCONTAINER=true
 
 ENV SHELL=/bin/zsh
 
-ENV NVM_DIR="/home/$USERNAME/.nvm"
-RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
-
-RUN bash -c "source $NVM_DIR/nvm.sh && \
-    if [[ \"$NODE_VERSION\" == '--lts' ]]; then \
-        nvm install --lts && \
-        nvm alias default 'lts/*'; \
-    else \
-        nvm install $NODE_VERSION && \
-        nvm alias default $NODE_VERSION; \
-    fi && \
-    nvm use default"
-
-RUN echo 'export NVM_DIR="$HOME/.nvm"' >> ~/.bashrc && \
-    echo '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"' >> ~/.bashrc && \
-    echo '[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"' >> ~/.bashrc
-
-RUN bash -c "source $NVM_DIR/nvm.sh && \
-    nvm use default && \
-    npm install -g @anthropic-ai/claude-code"
+# Install Claude Code natively (recommended method, no Node.js required)
+# Uses vendored script verified via checksums-base.sha256
+RUN bash /tmp/claude-install.sh
 
 RUN cat >> ~/.zshrc <<'EOF'
 
@@ -121,9 +116,9 @@ EOF
 
 USER root
 
-# Add sudoers entry for claude user (following Anthropic's model)
-RUN echo "claude ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/claude && \
-    chmod 0440 /etc/sudoers.d/claude
+# NOTE: sudoers entry is now created at RUNTIME by docker-entrypoint
+# only when --enable-sudo flag is explicitly passed.
+# This follows the principle of least privilege.
 
 RUN cat > /etc/profile.d/00-winsize.sh <<'EOF'
 if [ -n "$PS1" ] && command -v stty >/dev/null 2>&1; then
@@ -151,7 +146,11 @@ RUN mkdir -p /usr/local/lib/claudebox
 COPY tools-report.sh /usr/local/lib/claudebox/tools-report.sh
 
 USER $USERNAME
-RUN bash -c "source $NVM_DIR/nvm.sh && claude --version"
+# Clean up vendored scripts after use
+RUN rm -rf /tmp/zsh-setup-local.sh /tmp/zsh-assets /tmp/uv-install.sh /tmp/claude-install.sh /tmp/checksums-base.sha256
+
+# Verify Claude Code installation
+RUN ~/.local/bin/claude --version
 
 WORKDIR /workspace
 USER root
