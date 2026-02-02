@@ -35,36 +35,50 @@ fi
 # ============================================================================
 
 # Detect and set the appropriate MD5 command based on OS
+# Security fix: Removed eval usage and use direct command selection
 set_md5_command() {
     if command -v md5sum >/dev/null 2>&1; then
         # Linux style: md5sum outputs "hash  filename"
-        MD5_CMD="md5sum"
-        MD5_EXTRACT='cut -d" " -f1'
+        MD5_STYLE="linux"
     elif command -v md5 >/dev/null 2>&1; then
         # macOS style: md5 -q outputs just the hash
-        MD5_CMD="md5 -q"
-        MD5_EXTRACT='cat'
+        MD5_STYLE="macos"
     else
         error "No MD5 command found. Please install md5sum or md5."
     fi
-    export MD5_CMD
-    export MD5_EXTRACT
+    export MD5_STYLE
 }
 
 # Calculate MD5 hash of a file (cross-platform)
+# Security fix: Use case statement instead of eval
 md5_file() {
     local file="$1"
     if [[ -f "$file" ]]; then
-        $MD5_CMD "$file" 2>/dev/null | eval $MD5_EXTRACT
+        case "$MD5_STYLE" in
+            linux)
+                md5sum "$file" 2>/dev/null | cut -d' ' -f1
+                ;;
+            macos)
+                md5 -q "$file" 2>/dev/null
+                ;;
+        esac
     else
         echo ""
     fi
 }
 
 # Calculate MD5 hash of a string (cross-platform)
+# Security fix: Use case statement instead of eval
 md5_string() {
     local string="$1"
-    echo -n "$string" | $MD5_CMD 2>/dev/null | eval $MD5_EXTRACT
+    case "$MD5_STYLE" in
+        linux)
+            echo -n "$string" | md5sum 2>/dev/null | cut -d' ' -f1
+            ;;
+        macos)
+            echo -n "$string" | md5 -q 2>/dev/null
+            ;;
+    esac
 }
 
 # Initialize MD5 command on library load

@@ -7,10 +7,14 @@ update_symlink() {
     mkdir -p "$(dirname "$LINK_TARGET")"
 
     # Check if symlink exists and points to the correct location
+    # Security fix: Use realpath for canonical path comparison to prevent race conditions
     if [[ -L "$LINK_TARGET" ]]; then
         local current_target
-        current_target=$(readlink "$LINK_TARGET" 2>/dev/null || echo "")
-        if [[ "$current_target" == "$SCRIPT_PATH" ]]; then
+        local expected_target
+        # Get canonical paths for comparison
+        current_target=$(realpath "$LINK_TARGET" 2>/dev/null || readlink -f "$LINK_TARGET" 2>/dev/null || echo "")
+        expected_target=$(realpath "$SCRIPT_PATH" 2>/dev/null || readlink -f "$SCRIPT_PATH" 2>/dev/null || echo "$SCRIPT_PATH")
+        if [[ "$current_target" == "$expected_target" ]]; then
             if [[ "$VERBOSE" == "true" ]]; then
                 info "Symlink already correct: $LINK_TARGET → $SCRIPT_PATH"
             fi

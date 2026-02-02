@@ -113,11 +113,13 @@ _cmd_shell() {
         trap cleanup_admin EXIT
         
         if [[ "$VERBOSE" == "true" ]]; then
-            echo "[DEBUG] Running admin container with flags: ${shell_flags[*]}" >&2
+            # Bash 3.2 safe array expansion
+            echo "[DEBUG] Running admin container with flags: ${shell_flags[*]+${shell_flags[*]}}" >&2
             echo "[DEBUG] Remaining args after processing: $*" >&2
         fi
         # Don't pass any remaining arguments - only shell and the flags
-        run_claudebox_container "$temp_container" "interactive" shell "${shell_flags[@]}"
+        # Bash 3.2 safe array expansion
+        run_claudebox_container "$temp_container" "interactive" shell ${shell_flags[@]+"${shell_flags[@]}"}
         
         # Commit changes back to image
         fillbar
@@ -127,7 +129,8 @@ _cmd_shell() {
         success "Changes saved to image!"
     else
         # Regular shell mode - just run without committing
-        run_claudebox_container "" "interactive" shell "${shell_flags[@]}"
+        # Bash 3.2 safe array expansion
+        run_claudebox_container "" "interactive" shell ${shell_flags[@]+"${shell_flags[@]}"}
     fi
     
     exit 0
@@ -136,9 +139,25 @@ _cmd_shell() {
 _cmd_update() {
     # Handle update all specially
     if [[ "${1:-}" == "all" ]]; then
+        # Security warning for network-based updates
+        warn "SECURITY NOTICE: This will download updates from the network."
+        warn "Source: https://github.com/RchGrav/claudebox"
+        warn "For maximum security, consider manual updates with verification:"
+        warn "  1. git clone/pull the repository"
+        warn "  2. Verify commits and checksums"
+        warn "  3. Run ./install.sh"
+        echo
+        read -p "Continue with network update? [y/N] " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            info "Update cancelled."
+            return 0
+        fi
+        echo
+
         info "Updating all components..."
         echo
-        
+
         # Update claudebox script
         info "Updating claudebox script..."
         if command -v curl >/dev/null 2>&1; then
