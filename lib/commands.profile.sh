@@ -32,12 +32,15 @@ _cmd_profiles() {
         local desc=$(get_profile_description "$profile")
         local is_enabled=false
         # Check if profile is currently enabled
-        for enabled in "${current_profiles[@]}"; do
-            if [[ "$enabled" == "$profile" ]]; then
-                is_enabled=true
-                break
-            fi
-        done
+        # Bash 3.2 safe array expansion
+        if [[ ${#current_profiles[@]} -gt 0 ]]; then
+            for enabled in "${current_profiles[@]}"; do
+                if [[ "$enabled" == "$profile" ]]; then
+                    is_enabled=true
+                    break
+                fi
+            done
+        fi
         printf "  ${GREEN}%-15s${NC} " "$profile"
         if [[ "$is_enabled" == "true" ]]; then
             printf "${GREEN}✓${NC} "
@@ -93,7 +96,6 @@ _cmd_add() {
                 fi
 
                 local current_packages=()
-                local current_packages=()
                 while IFS= read -r line; do
                     [[ -n "$line" ]] && current_packages+=("$line")
                 done < <(read_profile_section "$profile_file" "packages")
@@ -129,7 +131,6 @@ _cmd_add() {
 
     update_profile_section "$profile_file" "profiles" "${selected[@]}"
 
-    local all_profiles=()
     local all_profiles=()
     while IFS= read -r line; do
         [[ -n "$line" ]] && all_profiles+=("$line")
@@ -174,8 +175,9 @@ _cmd_add() {
     fi
     echo
 
+    # Bash 3.2 safe array expansion
     if [[ ${#remaining[@]} -gt 0 ]]; then
-        set -- "${remaining[@]}"
+        set -- ${remaining[@]+"${remaining[@]}"}
     fi
 }
 
@@ -229,30 +231,36 @@ _cmd_remove() {
     # Remove specified profiles
     local new_profiles=()
     local python_profiles_removed=false
-    for profile in "${current_profiles[@]}"; do
-        local keep=true
-        for remove in "${to_remove[@]}"; do
-            if [[ "$profile" == "$remove" ]]; then
-                keep=false
-                # Check if we're removing a Python-related profile
-                if [[ "$profile" == "python" ]] || [[ "$profile" == "ml" ]] || [[ "$profile" == "datascience" ]]; then
-                    python_profiles_removed=true
+    # Bash 3.2 safe array expansion
+    if [[ ${#current_profiles[@]} -gt 0 ]]; then
+        for profile in "${current_profiles[@]}"; do
+            local keep=true
+            for remove in "${to_remove[@]}"; do
+                if [[ "$profile" == "$remove" ]]; then
+                    keep=false
+                    # Check if we're removing a Python-related profile
+                    if [[ "$profile" == "python" ]] || [[ "$profile" == "ml" ]] || [[ "$profile" == "datascience" ]]; then
+                        python_profiles_removed=true
+                    fi
+                    break
                 fi
-                break
-            fi
+            done
+            [[ "$keep" == "true" ]] && new_profiles+=("$profile")
         done
-        [[ "$keep" == "true" ]] && new_profiles+=("$profile")
-    done
+    fi
     
     # Check if any Python-related profiles remain
     local has_python_profiles=false
-    for profile in "${new_profiles[@]}"; do
-        if [[ "$profile" == "python" ]] || [[ "$profile" == "ml" ]] || [[ "$profile" == "datascience" ]]; then
-            has_python_profiles=true
-            break
-        fi
-    done
-    
+    # Bash 3.2 safe array expansion
+    if [[ ${#new_profiles[@]} -gt 0 ]]; then
+        for profile in "${new_profiles[@]}"; do
+            if [[ "$profile" == "python" ]] || [[ "$profile" == "ml" ]] || [[ "$profile" == "datascience" ]]; then
+                has_python_profiles=true
+                break
+            fi
+        done
+    fi
+
     # If we removed Python profiles and no Python profiles remain, clean up Python flags
     if [[ "$python_profiles_removed" == "true" ]] && [[ "$has_python_profiles" == "false" ]]; then
         init_project_dir "$PROJECT_DIR"
@@ -275,9 +283,12 @@ _cmd_remove() {
     # Write back the filtered profiles
     {
         echo "[profiles]"
-        for profile in "${new_profiles[@]}"; do
-            echo "$profile"
-        done
+        # Bash 3.2 safe array expansion
+        if [[ ${#new_profiles[@]} -gt 0 ]]; then
+            for profile in "${new_profiles[@]}"; do
+                echo "$profile"
+            done
+        fi
         echo ""
         
         # Preserve packages section if it exists
@@ -309,7 +320,6 @@ _cmd_install() {
 
     update_profile_section "$profile_file" "packages" "$@"
 
-    local all_packages=()
     local all_packages=()
     while IFS= read -r line; do
         [[ -n "$line" ]] && all_packages+=("$line")

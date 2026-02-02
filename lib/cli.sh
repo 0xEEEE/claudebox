@@ -8,8 +8,14 @@
 
 # Four flag buckets (Bash 3.2 compatible - no associative arrays)
 readonly HOST_ONLY_FLAGS=(--verbose rebuild)
-readonly CONTROL_FLAGS=(--enable-sudo --disable-firewall)
+readonly CONTROL_FLAGS=(--enable-sudo --disable-firewall --no-host-skills --no-host-lsp)
 readonly SCRIPT_COMMANDS=(shell create slot slots revoke profiles projects profile info help -h --help add remove install allowlist clean save project tmux kill)
+
+# Initialize global CLI arrays (Bash 3.2 requires this before any access)
+CLI_HOST_FLAGS=()
+CLI_CONTROL_FLAGS=()
+CLI_SCRIPT_COMMAND=""
+CLI_PASS_THROUGH=()
 
 # parse_cli_args - Central CLI parsing with four-bucket architecture
 # Usage: parse_cli_args "$@"
@@ -20,18 +26,24 @@ readonly SCRIPT_COMMANDS=(shell create slot slots revoke profiles projects profi
 #   pass_through: Array of args to pass to Claude in container
 # Note: Each argument goes into exactly ONE bucket - no duplication
 parse_cli_args() {
-    local all_args=("$@")
-    
+    # Bash 3.2 safe: handle case when no arguments are passed
+    local all_args=()
+    if [[ $# -gt 0 ]]; then
+        all_args=("$@")
+    fi
+
     # Initialize bucket arrays
     host_flags=()
     control_flags=()
     script_command=""
     pass_through=()
-    
+
     # Single parsing loop - each arg goes into exactly ONE bucket
     local found_script_command=false
-    
-    for arg in "${all_args[@]}"; do
+
+    # Bash 3.2 safe array expansion
+    if [[ ${#all_args[@]} -gt 0 ]]; then
+        for arg in "${all_args[@]}"; do
         if [[ " ${HOST_ONLY_FLAGS[*]} " == *" $arg "* ]]; then
             # Bucket 1: Host-only flags
             host_flags+=("$arg")
@@ -46,30 +58,47 @@ parse_cli_args() {
             # Bucket 4: Pass-through (everything else)
             pass_through+=("$arg")
         fi
-    done
-    
+        done
+    fi
+
     # Export results for use by main script
-    export CLI_HOST_FLAGS=("${host_flags[@]}")
-    export CLI_CONTROL_FLAGS=("${control_flags[@]}")
+    # Bash 3.2 safe array expansion
+    if [[ ${#host_flags[@]} -gt 0 ]]; then
+        export CLI_HOST_FLAGS=("${host_flags[@]}")
+    else
+        export CLI_HOST_FLAGS=()
+    fi
+    if [[ ${#control_flags[@]} -gt 0 ]]; then
+        export CLI_CONTROL_FLAGS=("${control_flags[@]}")
+    else
+        export CLI_CONTROL_FLAGS=()
+    fi
     export CLI_SCRIPT_COMMAND="$script_command"
-    export CLI_PASS_THROUGH=("${pass_through[@]}")
+    if [[ ${#pass_through[@]} -gt 0 ]]; then
+        export CLI_PASS_THROUGH=("${pass_through[@]}")
+    else
+        export CLI_PASS_THROUGH=()
+    fi
 }
 
 # Process host-only flags and set environment variables
 process_host_flags() {
-    for flag in "${CLI_HOST_FLAGS[@]}"; do
-        case "$flag" in
-            --verbose)
-                export VERBOSE=true
-                ;;
-            rebuild)
-                export REBUILD=true
-                ;;
-            tmux)
-                export CLAUDEBOX_WRAP_TMUX=true
-                ;;
-        esac
-    done
+    # Bash 3.2 safe: check if array is set and has elements
+    if [[ -n "${CLI_HOST_FLAGS+x}" ]] && [[ ${#CLI_HOST_FLAGS[@]} -gt 0 ]]; then
+        for flag in "${CLI_HOST_FLAGS[@]}"; do
+            case "$flag" in
+                --verbose)
+                    export VERBOSE=true
+                    ;;
+                rebuild)
+                    export REBUILD=true
+                    ;;
+                tmux)
+                    export CLAUDEBOX_WRAP_TMUX=true
+                    ;;
+            esac
+        done
+    fi
 }
 
 # Get command requirements - returns one of:
@@ -125,11 +154,12 @@ requires_slot() {
 # Debug output for parsed arguments (only if VERBOSE=true)
 debug_parsed_args() {
     if [[ "${VERBOSE:-false}" == "true" ]]; then
-        echo "[DEBUG] CLI Parser Results:" >&2
-        echo "[DEBUG]   Host flags: ${CLI_HOST_FLAGS[*]}" >&2
-        echo "[DEBUG]   Control flags: ${CLI_CONTROL_FLAGS[*]}" >&2
-        echo "[DEBUG]   Script command: ${CLI_SCRIPT_COMMAND}" >&2
-        echo "[DEBUG]   Pass-through: ${CLI_PASS_THROUGH[*]}" >&2
+        # Bash 3.2 safe array expansion
+        printf "[DEBUG] CLI Parser Results:\n" >&2
+        printf "[DEBUG]   Host flags: %s\n" "${CLI_HOST_FLAGS[*]:-}" >&2
+        printf "[DEBUG]   Control flags: %s\n" "${CLI_CONTROL_FLAGS[*]:-}" >&2
+        printf "[DEBUG]   Script command: %s\n" "${CLI_SCRIPT_COMMAND:-}" >&2
+        printf "[DEBUG]   Pass-through: %s\n" "${CLI_PASS_THROUGH[*]:-}" >&2
     fi
 }
 

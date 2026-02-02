@@ -137,7 +137,8 @@ main() {
     # If command doesn't need Docker, skip all Docker setup
     if [[ "$cmd_requirements" == "none" ]]; then
         # Dispatch the command directly and exit
-        dispatch_command "${CLI_SCRIPT_COMMAND}" "${CLI_PASS_THROUGH[@]}" "${CLI_CONTROL_FLAGS[@]}"
+        # Bash 3.2 safe array expansion
+        dispatch_command "${CLI_SCRIPT_COMMAND}" ${CLI_PASS_THROUGH[@]+"${CLI_PASS_THROUGH[@]}"} ${CLI_CONTROL_FLAGS[@]+"${CLI_CONTROL_FLAGS[@]}"}
         exit $?
     fi
     
@@ -186,7 +187,17 @@ main() {
         cp "${root_dir}/lib/tools-report.sh" "$build_context/tools-report.sh" || error "Failed to copy tools-report.sh"
         cp "${root_dir}/build/dockerignore" "$build_context/.dockerignore" || error "Failed to copy .dockerignore"
         chmod +x "$build_context/docker-entrypoint.sh" "$build_context/init-firewall" "$build_context/generate-tools-readme"
-        
+
+        # Copy vendored scripts for supply chain security
+        # Preserve full path structure: vendor/scripts/...
+        if [[ -d "${root_dir}/vendor/scripts" ]]; then
+            rm -rf "$build_context/vendor"
+            mkdir -p "$build_context/vendor"
+            cp -r "${root_dir}/vendor/scripts" "$build_context/vendor/scripts" || error "Failed to copy vendor scripts"
+        else
+            error "Vendor scripts directory not found: ${root_dir}/vendor/scripts\nPlease download the official release or set up the vendor directory."
+        fi
+
         # Create core Dockerfile
         local core_dockerfile="$build_context/Dockerfile.core"
         local base_dockerfile=$(cat "${root_dir}/build/Dockerfile") || error "Failed to read base Dockerfile"
@@ -205,7 +216,6 @@ main() {
             --build-arg USER_ID="$USER_ID" \
             --build-arg GROUP_ID="$GROUP_ID" \
             --build-arg USERNAME="$DOCKER_USER" \
-            --build-arg NODE_VERSION="$NODE_VERSION" \
             --build-arg DELTA_VERSION="$DELTA_VERSION" \
             -f "$core_dockerfile" -t "$core_image" "$build_context" || error "Failed to build core image"
             
@@ -299,7 +309,8 @@ main() {
         local cmd_req=$(get_command_requirements "${CLI_SCRIPT_COMMAND}")
         # Only run pre-flight for commands that need Docker or image
         if [[ "$cmd_req" == "docker" ]] || [[ "$cmd_req" == "image" ]]; then
-            if ! preflight_check "${CLI_SCRIPT_COMMAND}" "${CLI_PASS_THROUGH[@]}"; then
+            # Bash 3.2 safe array expansion
+            if ! preflight_check "${CLI_SCRIPT_COMMAND}" ${CLI_PASS_THROUGH[@]+"${CLI_PASS_THROUGH[@]}"}; then
                 # Pre-flight check failed and printed error
                 exit 1
             fi
@@ -352,19 +363,22 @@ main() {
                 # Separate Python-only profiles from Docker-affecting profiles
                 local docker_profiles=()
                 local python_only_profiles=("python" "ml" "datascience")
-                
-                for profile in "${current_profiles[@]}"; do
-                    local is_python_only=false
-                    for py_profile in "${python_only_profiles[@]}"; do
-                        if [[ "$profile" == "$py_profile" ]]; then
-                            is_python_only=true
-                            break
+
+                # Bash 3.2 safe array expansion
+                if [[ ${#current_profiles[@]} -gt 0 ]]; then
+                    for profile in "${current_profiles[@]}"; do
+                        local is_python_only=false
+                        for py_profile in "${python_only_profiles[@]}"; do
+                            if [[ "$profile" == "$py_profile" ]]; then
+                                is_python_only=true
+                                break
+                            fi
+                        done
+                        if [[ "$is_python_only" == "false" ]]; then
+                            docker_profiles+=("$profile")
                         fi
                     done
-                    if [[ "$is_python_only" == "false" ]]; then
-                        docker_profiles+=("$profile")
-                    fi
-                done
+                fi
                 
                 # Calculate hash only for Docker-affecting profiles
                 local docker_profiles_hash=""
@@ -426,7 +440,8 @@ main() {
     if [[ -n "${CLI_SCRIPT_COMMAND}" ]]; then
         # Script command - dispatch on host
         # Pass control flags and pass-through args to dispatch_command
-        dispatch_command "${CLI_SCRIPT_COMMAND}" "${CLI_PASS_THROUGH[@]}" "${CLI_CONTROL_FLAGS[@]}"
+        # Bash 3.2 safe array expansion
+        dispatch_command "${CLI_SCRIPT_COMMAND}" ${CLI_PASS_THROUGH[@]+"${CLI_PASS_THROUGH[@]}"} ${CLI_CONTROL_FLAGS[@]+"${CLI_CONTROL_FLAGS[@]}"}
         exit $?
     else
         # No script command - running Claude interactively
@@ -472,12 +487,15 @@ main() {
             # Check if stdin is not a terminal (i.e., we're receiving piped input)
             # and -p/--print flag isn't already present
             local has_print_flag=false
-            for arg in "${CLI_PASS_THROUGH[@]}"; do
-                if [[ "$arg" == "-p" ]] || [[ "$arg" == "--print" ]]; then
-                    has_print_flag=true
-                    break
-                fi
-            done
+            # Bash 3.2 safe array expansion
+            if [[ ${#CLI_PASS_THROUGH[@]} -gt 0 ]]; then
+                for arg in "${CLI_PASS_THROUGH[@]}"; do
+                    if [[ "$arg" == "-p" ]] || [[ "$arg" == "--print" ]]; then
+                        has_print_flag=true
+                        break
+                    fi
+                done
+            fi
             
             if [[ "$VERBOSE" == "true" ]]; then
                 if [[ -t 0 ]]; then
@@ -495,9 +513,11 @@ main() {
                 fi
                 local piped_input
                 piped_input=$(cat)
-                run_claudebox_container "$container_name" "interactive" "${CLI_CONTROL_FLAGS[@]}" "-p" "$piped_input" "${CLI_PASS_THROUGH[@]}"
+                # Bash 3.2 safe array expansion
+                run_claudebox_container "$container_name" "interactive" ${CLI_CONTROL_FLAGS[@]+"${CLI_CONTROL_FLAGS[@]}"} "-p" "$piped_input" ${CLI_PASS_THROUGH[@]+"${CLI_PASS_THROUGH[@]}"}
             else
-                run_claudebox_container "$container_name" "interactive" "${CLI_CONTROL_FLAGS[@]}" "${CLI_PASS_THROUGH[@]}"
+                # Bash 3.2 safe array expansion
+                run_claudebox_container "$container_name" "interactive" ${CLI_CONTROL_FLAGS[@]+"${CLI_CONTROL_FLAGS[@]}"} ${CLI_PASS_THROUGH[@]+"${CLI_PASS_THROUGH[@]}"}
             fi
         else
             show_no_slots_menu
@@ -520,6 +540,14 @@ build_docker_image() {
     cp "${root_dir}/lib/tools-report.sh" "$build_context/tools-report.sh" || error "Failed to copy tools-report.sh"
     cp "${root_dir}/build/dockerignore" "$build_context/.dockerignore" || error "Failed to copy .dockerignore"
     chmod +x "$build_context/docker-entrypoint.sh" "$build_context/init-firewall" "$build_context/generate-tools-readme"
+
+    # Copy vendored scripts for supply chain security
+    # Preserve full path structure: vendor/scripts/...
+    if [[ -d "${root_dir}/vendor/scripts" ]]; then
+        rm -rf "$build_context/vendor"
+        mkdir -p "$build_context/vendor"
+        cp -r "${root_dir}/vendor/scripts" "$build_context/vendor/scripts" || error "Failed to copy vendor scripts"
+    fi
     
     
     # Build profile installations
@@ -537,33 +565,39 @@ build_docker_image() {
         done < <(read_profile_section "$profiles_file" "profiles")
         
         # Generate profile installations
-        for profile in "${current_profiles[@]}"; do
-            profile=$(echo "$profile" | tr -d '[:space:]')
-            [[ -z "$profile" ]] && continue
-            
-            # Convert hyphens to underscores for function names
-            local profile_fn="get_profile_${profile//-/_}"
-            if type -t "$profile_fn" >/dev/null; then
-                profile_installations+=$'\n'"$($profile_fn)"
-            fi
-        done
-        
+        # Bash 3.2 safe array expansion
+        if [[ ${#current_profiles[@]} -gt 0 ]]; then
+            for profile in "${current_profiles[@]}"; do
+                profile=$(echo "$profile" | tr -d '[:space:]')
+                [[ -z "$profile" ]] && continue
+
+                # Convert hyphens to underscores for function names
+                local profile_fn="get_profile_${profile//-/_}"
+                if type -t "$profile_fn" >/dev/null; then
+                    profile_installations+=$'\n'"$($profile_fn)"
+                fi
+            done
+        fi
+
         # Calculate hash only for Docker-affecting profiles
         local docker_profiles=()
         local python_only_profiles=("python" "ml" "datascience")
-        
-        for profile in "${current_profiles[@]}"; do
-            local is_python_only=false
-            for py_profile in "${python_only_profiles[@]}"; do
-                if [[ "$profile" == "$py_profile" ]]; then
-                    is_python_only=true
-                    break
+
+        # Bash 3.2 safe array expansion
+        if [[ ${#current_profiles[@]} -gt 0 ]]; then
+            for profile in "${current_profiles[@]}"; do
+                local is_python_only=false
+                for py_profile in "${python_only_profiles[@]}"; do
+                    if [[ "$profile" == "$py_profile" ]]; then
+                        is_python_only=true
+                        break
+                    fi
+                done
+                if [[ "$is_python_only" == "false" ]]; then
+                    docker_profiles+=("$profile")
                 fi
             done
-            if [[ "$is_python_only" == "false" ]]; then
-                docker_profiles+=("$profile")
-            fi
-        done
+        fi
         
         if [[ ${#docker_profiles[@]} -gt 0 ]]; then
             profile_hash=$(printf '%s\n' "${docker_profiles[@]}" | sort | cksum | cut -d' ' -f1)
@@ -586,22 +620,20 @@ LABEL claudebox.profiles.crc=\"$profiles_file_hash\"
 LABEL claudebox.project=\"$project_folder_name\""
     
     # Replace placeholders in the project template
+    # Use bash substitution instead of awk for macOS compatibility (awk -v doesn't handle newlines well)
     local final_dockerfile="$base_dockerfile"
-    
-    # Replace WHOLE lines that contain the placeholders (with optional spaces)
-    local final_dockerfile
-    final_dockerfile=$(awk -v pi="$profile_installations" -v lbs="$labels" '
-    # If the whole line is {{ PROFILE_INSTALLATIONS }}, print injected block and skip
-    /^[[:space:]]*\{\{[[:space:]]*PROFILE_INSTALLATIONS[[:space:]]*\}\}[[:space:]]*$/ { print pi; next }
-    # If the whole line is {{ LABELS }}, print labels block and skip
-    /^[[:space:]]*\{\{[[:space:]]*LABELS[[:space:]]*\}\}[[:space:]]*$/ { print lbs; next }
-    # Otherwise, print the line unchanged
-    { print }
-    ' <<<"$base_dockerfile") || error "Failed to apply Dockerfile substitutions"
+
+    # Replace {{PROFILE_INSTALLATIONS}} placeholder
+    local pi_placeholder='{{PROFILE_INSTALLATIONS}}'
+    final_dockerfile="${final_dockerfile//$pi_placeholder/$profile_installations}"
+
+    # Replace {{LABELS}} placeholder
+    local labels_placeholder='{{LABELS}}'
+    final_dockerfile="${final_dockerfile//$labels_placeholder/$labels}"
 
     # Guard: ensure no unreplaced placeholders remain
-    if grep -q '{{PROFILE_INSTALLATIONS}}' <<<"$final_dockerfile" grep -q '{{LABELS}}' <<<"$final_dockerfile"; then
-    error "Unreplaced placeholders remain in generated Dockerfile"
+    if [[ "$final_dockerfile" == *'{{PROFILE_INSTALLATIONS}}'* ]] || [[ "$final_dockerfile" == *'{{LABELS}}'* ]]; then
+        error "Unreplaced placeholders remain in generated Dockerfile"
     fi
 
     printf '%s' "$final_dockerfile" > "$dockerfile"
