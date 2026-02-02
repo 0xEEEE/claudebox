@@ -1,0 +1,13 @@
+{
+  "name": "ty-lsp",
+  "description": "ty Python type checker and language server (from Astral, creators of uv and ruff)",
+  "version": "1.0.0",
+  "author": {
+    "name": "ClaudeBox",
+    "url": "https://github.com/RchGrav/claudebox"
+  },
+  "homepage": "https://docs.astral.sh/ty/",
+  "repository": "https://github.com/astral-sh/ty",
+  "license": "MIT",
+  "keywords": ["python", "lsp", "type-checker", "ty", "astral"]
+}

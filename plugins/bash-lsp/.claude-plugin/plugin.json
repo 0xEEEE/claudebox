@@ -1,0 +1,13 @@
+{
+  "name": "bash-lsp",
+  "description": "Bash Language Server for shell script development",
+  "version": "1.0.0",
+  "author": {
+    "name": "ClaudeBox",
+    "url": "https://github.com/RchGrav/claudebox"
+  },
+  "homepage": "https://github.com/bash-lsp/bash-language-server",
+  "repository": "https://github.com/bash-lsp/bash-language-server",
+  "license": "MIT",
+  "keywords": ["bash", "shell", "lsp", "language-server"]
+}

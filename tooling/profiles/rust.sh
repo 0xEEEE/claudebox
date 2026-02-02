@@ -14,9 +14,18 @@ export CARGO_HOME="$HOME/.claudebox/.cargo"
 export PATH="$CARGO_HOME/bin:$PATH"
 
 # Install rustup if not already installed
+# Uses vendored rustup.sh script (verified via checksums-profiles.sha256)
+# Note: The script still downloads the Rust toolchain from official servers
 if [ ! -f "$CARGO_HOME/bin/rustup" ]; then
     echo "Installing Rust toolchain..."
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+    VENDORED_RUSTUP="/tmp/rustup.sh"
+    if [ -f "$VENDORED_RUSTUP" ]; then
+        sh "$VENDORED_RUSTUP" -y --no-modify-path
+    else
+        echo "ERROR: Vendored rustup.sh not found at $VENDORED_RUSTUP" >&2
+        echo "This profile requires the vendored rustup script to be copied first." >&2
+        exit 1
+    fi
 fi
 
 # Source the environment

@@ -1,0 +1,19 @@
+{
+  "bash": {
+    "command": "bash-language-server",
+    "args": ["start"],
+    "extensionToLanguage": {
+      ".sh": "bash",
+      ".bash": "bash",
+      ".bashrc": "bash",
+      ".bash_profile": "bash",
+      ".bash_aliases": "bash",
+      ".zsh": "bash",
+      ".zshrc": "bash"
+    },
+    "initializationOptions": {},
+    "settings": {},
+    "restartOnCrash": true,
+    "maxRestarts": 3
+  }
+}
