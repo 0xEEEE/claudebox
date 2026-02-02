@@ -473,36 +473,6 @@ else
                 fi
             fi
             
-            # Check if .claude/projects exists and filter out -c/--continue if not
-            if [[ ! -d "$HOME/.claude/projects" ]]; then
-                # Filter out -c and --continue flags
-                filtered_args=()
-                skip_next=false
-                for arg in "$@"; do
-                    if [[ "$skip_next" == "true" ]]; then
-                        skip_next=false
-                        continue
-                    fi
-                    
-                    case "$arg" in
-                        -c|--continue)
-                            # Skip this flag
-                            ;;
-                        *)
-                            filtered_args+=("$arg")
-                            ;;
-                    esac
-                done
-                
-                # Update positional parameters
-                # Bash 3.2 safe array expansion
-                if [[ ${#filtered_args[@]} -gt 0 ]]; then
-                    set -- ${filtered_args[@]+"${filtered_args[@]}"}
-                else
-                    set --
-                fi
-            fi
-            
             # If no arguments and stdin is a terminal, run claude in interactive mode
             # Bash 3.2 safe array expansion for plugin_args and mcp_config_args
             if [[ "${CLAUDEBOX_WRAP_TMUX:-false}" == "true" ]]; then

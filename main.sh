@@ -89,7 +89,7 @@ main() {
     
     # Step 3: Process host flags (sets VERBOSE, REBUILD, CLAUDEBOX_WRAP_TMUX)
     process_host_flags
-    
+
     # Step 3a: Handle saved flags based on the first CLI argument
     local first_arg="${original_args[0]:-}"
     

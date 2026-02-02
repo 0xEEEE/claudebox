@@ -44,40 +44,41 @@ parse_cli_args() {
     # Bash 3.2 safe array expansion
     if [[ ${#all_args[@]} -gt 0 ]]; then
         for arg in "${all_args[@]}"; do
-        if [[ " ${HOST_ONLY_FLAGS[*]} " == *" $arg "* ]]; then
-            # Bucket 1: Host-only flags
-            host_flags+=("$arg")
-        elif [[ " ${CONTROL_FLAGS[*]} " == *" $arg "* ]]; then
-            # Bucket 2: Control flags (pass to container)
-            control_flags+=("$arg")
-        elif [[ "$found_script_command" == "false" ]] && [[ " ${SCRIPT_COMMANDS[*]} " == *" $arg "* ]]; then
-            # Bucket 3: Script commands (first one wins)
-            script_command="$arg"
-            found_script_command=true
-        else
-            # Bucket 4: Pass-through (everything else)
-            pass_through+=("$arg")
-        fi
+            if [[ " ${HOST_ONLY_FLAGS[*]} " == *" $arg "* ]]; then
+                # Bucket 1: Host-only flags
+                host_flags+=("$arg")
+            elif [[ " ${CONTROL_FLAGS[*]} " == *" $arg "* ]]; then
+                # Bucket 2: Control flags (pass to container)
+                control_flags+=("$arg")
+            elif [[ "$found_script_command" == "false" ]] && [[ " ${SCRIPT_COMMANDS[*]} " == *" $arg "* ]]; then
+                # Bucket 3: Script commands (first one wins)
+                script_command="$arg"
+                found_script_command=true
+            else
+                # Bucket 4: Pass-through (everything else)
+                pass_through+=("$arg")
+            fi
         done
     fi
 
-    # Export results for use by main script
+    # Copy results to global arrays for use by main script
+    # Note: Arrays cannot be exported in Bash, so we just assign to globals
     # Bash 3.2 safe array expansion
     if [[ ${#host_flags[@]} -gt 0 ]]; then
-        export CLI_HOST_FLAGS=("${host_flags[@]}")
+        CLI_HOST_FLAGS=("${host_flags[@]}")
     else
-        export CLI_HOST_FLAGS=()
+        CLI_HOST_FLAGS=()
     fi
     if [[ ${#control_flags[@]} -gt 0 ]]; then
-        export CLI_CONTROL_FLAGS=("${control_flags[@]}")
+        CLI_CONTROL_FLAGS=("${control_flags[@]}")
     else
-        export CLI_CONTROL_FLAGS=()
+        CLI_CONTROL_FLAGS=()
     fi
-    export CLI_SCRIPT_COMMAND="$script_command"
+    CLI_SCRIPT_COMMAND="$script_command"
     if [[ ${#pass_through[@]} -gt 0 ]]; then
-        export CLI_PASS_THROUGH=("${pass_through[@]}")
+        CLI_PASS_THROUGH=("${pass_through[@]}")
     else
-        export CLI_PASS_THROUGH=()
+        CLI_PASS_THROUGH=()
     fi
 }
 
