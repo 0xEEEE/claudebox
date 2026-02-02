@@ -1,67 +1,188 @@
 #!/bin/bash
+# init-firewall: Initialize container network firewall
+# This script runs once at container startup and then deletes itself.
+#
+# Security features:
+# - Default-deny egress policy
+# - Allowlist-based domain filtering
+# - DNS resolution for domain names
+# - CIDR notation support for IP ranges
+#
 set -euo pipefail
 
+# Logging function for debugging
+log() {
+    echo "[init-firewall] $1" >&2
+}
 
+log_error() {
+    echo "[init-firewall] ERROR: $1" >&2
+}
+
+# State tracking
+FIREWALL_INITIALIZED=false
+SCRIPT_PATH="$(realpath "$0")"
+DEBUG_LOG="/tmp/firewall-init.log"
+
+# Security fix: Always remove script on exit (don't leave executable files around)
+# Log debug info to file instead of leaving script behind
+cleanup() {
+    local exit_code=$?
+    if [ "$FIREWALL_INITIALIZED" != "true" ] && [ "${DISABLE_FIREWALL:-false}" != "true" ]; then
+        # Log failure details for debugging
+        {
+            echo "Firewall initialization failed at $(date)"
+            echo "Exit code: $exit_code"
+            echo "FIREWALL_INITIALIZED: $FIREWALL_INITIALIZED"
+            echo "DISABLE_FIREWALL: ${DISABLE_FIREWALL:-false}"
+        } > "$DEBUG_LOG" 2>&1
+        log_error "Firewall initialization incomplete (exit code: $exit_code). Debug log: $DEBUG_LOG"
+    fi
+    # Always remove script - security best practice
+    rm -f "$SCRIPT_PATH"
+}
+trap cleanup EXIT
+
+# Handle disabled firewall case
 if [ "${DISABLE_FIREWALL:-false}" = "true" ]; then
-    rm -f "$0"
+    log "Firewall disabled by DISABLE_FIREWALL flag"
     exit 0
 fi
-iptables -F OUTPUT 2>/dev/null || true
-iptables -F INPUT 2>/dev/null || true
+
+log "Initializing firewall rules..."
+
+# Flush existing rules (ignore errors if no rules exist)
+iptables -F OUTPUT 2>/dev/null || log "No OUTPUT rules to flush"
+iptables -F INPUT 2>/dev/null || log "No INPUT rules to flush"
+
+# Allow DNS queries (required for domain resolution)
 iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
 iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
 iptables -A INPUT -p udp --sport 53 -j ACCEPT
+
+# Allow loopback interface
 iptables -A OUTPUT -o lo -j ACCEPT
 iptables -A INPUT -i lo -j ACCEPT
 iptables -A OUTPUT -s 127.0.0.0/8 -d 127.0.0.0/8 -j ACCEPT
 iptables -A INPUT -s 127.0.0.0/8 -d 127.0.0.0/8 -j ACCEPT
+
+# Allow established connections
 iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-# Default allowed domains
+
+# Default allowed domains (Anthropic services)
 DEFAULT_DOMAINS="api.anthropic.com console.anthropic.com statsig.anthropic.com sentry.io"
 
 ALLOWED_DOMAINS="$DEFAULT_DOMAINS"
 ALLOWLIST_FILE="/home/DOCKERUSER/.claudebox/allowlist"
+
+# Domain validation regex: alphanumeric, hyphens, dots, and optional CIDR notation
+VALID_DOMAIN_REGEX='^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?(/[0-9]+)?$'
+
+# Load custom allowlist if exists
 if [ -f "$ALLOWLIST_FILE" ]; then
+    log "Loading custom allowlist from $ALLOWLIST_FILE"
     while IFS= read -r line; do
         [[ "$line" =~ ^#.* ]] && continue
         [[ -z "$line" ]] && continue
         domain="${line#\*.}"
         domain="$(echo "$domain" | xargs)"
-        [[ -n "$domain" ]] && ALLOWED_DOMAINS="$ALLOWED_DOMAINS $domain"
+        # Validate domain format before adding
+        if [[ -n "$domain" ]] && [[ "$domain" =~ $VALID_DOMAIN_REGEX ]]; then
+            ALLOWED_DOMAINS="$ALLOWED_DOMAINS $domain"
+        else
+            log_error "Skipping invalid domain format: $domain"
+        fi
     done < "$ALLOWLIST_FILE"
 fi
 
+# Configure allowed domains using ipset (preferred) or iptables fallback
+# Check if ipset + iptables -m set is truly functional (full chain test)
+IPSET_FUNCTIONAL=false
 if command -v ipset >/dev/null 2>&1; then
-    ipset destroy allowed-domains 2>/dev/null || true
-    ipset create allowed-domains hash:net
-    ipset destroy allowed-ips 2>/dev/null || true
-    ipset create allowed-ips hash:net
-
-    for domain in $ALLOWED_DOMAINS; do
-        if [[ "$domain" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]]; then
-            ipset add allowed-ips $domain 2>/dev/null || true
-        else
-            ips=$(getent hosts $domain 2>/dev/null | awk '{print $1}')
-            for ip in $ips; do
-                ipset add allowed-domains $ip 2>/dev/null || true
-            done
-        fi
-    done
-    iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT
-    iptables -A OUTPUT -m set --match-set allowed-ips dst -j ACCEPT
-else
-    for domain in $ALLOWED_DOMAINS; do
-        if [[ "$domain" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]]; then
-            iptables -A OUTPUT -d $domain -j ACCEPT
-        else
-            ips=$(getent hosts $domain 2>/dev/null | awk '{print $1}')
-            for ip in $ips; do
-                iptables -A OUTPUT -d $ip -j ACCEPT
-            done
-        fi
-    done
+    # Full functional test: create set, add IP, use in iptables, then cleanup
+    if ipset create _firewall_test hash:net 2>/dev/null && \
+       ipset add _firewall_test 127.0.0.1 2>/dev/null && \
+       iptables -A OUTPUT -m set --match-set _firewall_test dst -j ACCEPT 2>/dev/null; then
+        # Full chain works - clean up test rules
+        iptables -D OUTPUT -m set --match-set _firewall_test dst -j ACCEPT 2>/dev/null || true
+        ipset destroy _firewall_test 2>/dev/null || true
+        IPSET_FUNCTIONAL=true
+        log "ipset + iptables -m set: functional"
+    else
+        # Cleanup any partial test state
+        iptables -D OUTPUT -m set --match-set _firewall_test dst -j ACCEPT 2>/dev/null || true
+        ipset destroy _firewall_test 2>/dev/null || true
+        log "ipset or iptables -m set: not functional, using fallback"
+    fi
 fi
+
+if [ "$IPSET_FUNCTIONAL" = "true" ]; then
+    log "Using ipset for domain filtering"
+    ipset destroy allowed-domains 2>/dev/null || true
+    ipset destroy allowed-ips 2>/dev/null || true
+
+    # Create sets with error handling
+    if ! ipset create allowed-domains hash:net 2>/dev/null || \
+       ! ipset create allowed-ips hash:net 2>/dev/null; then
+        log "Failed to create ipsets, falling back to direct rules"
+        ipset destroy allowed-domains 2>/dev/null || true
+        ipset destroy allowed-ips 2>/dev/null || true
+        IPSET_FUNCTIONAL=false
+    fi
+fi
+
+# Only proceed with ipset if still functional
+if [ "$IPSET_FUNCTIONAL" = "true" ]; then
+    for domain in $ALLOWED_DOMAINS; do
+        if [[ "$domain" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$ ]]; then
+            ipset add allowed-ips "$domain" 2>/dev/null || true
+        else
+            ips=$(getent hosts "$domain" 2>/dev/null | awk '{print $1}') || true
+            for ip in $ips; do
+                ipset add allowed-domains "$ip" 2>/dev/null || true
+            done
+        fi
+    done
+
+    # Apply iptables rules with ipset matching
+    iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT 2>/dev/null || true
+    iptables -A OUTPUT -m set --match-set allowed-ips dst -j ACCEPT 2>/dev/null || true
+    log "ipset rules applied"
+fi
+
+# Fallback to direct iptables rules if ipset is not functional
+if [ "$IPSET_FUNCTIONAL" != "true" ]; then
+    log "Using iptables rules directly (ipset not available)"
+    IPTABLES_RULES_ADDED=0
+    for domain in $ALLOWED_DOMAINS; do
+        if [[ "$domain" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$ ]]; then
+            if iptables -A OUTPUT -d "$domain" -j ACCEPT 2>/dev/null; then
+                IPTABLES_RULES_ADDED=$((IPTABLES_RULES_ADDED + 1))
+            else
+                log "Warning: Failed to add iptables rule for: $domain"
+            fi
+        else
+            ips=$(getent hosts "$domain" 2>/dev/null | awk '{print $1}') || true
+            if [ -z "$ips" ]; then
+                log "Warning: Could not resolve domain: $domain"
+            fi
+            for ip in $ips; do
+                if iptables -A OUTPUT -d "$ip" -j ACCEPT 2>/dev/null; then
+                    IPTABLES_RULES_ADDED=$((IPTABLES_RULES_ADDED + 1))
+                else
+                    log "Warning: Failed to add iptables rule for: $ip ($domain)"
+                fi
+            done
+        fi
+    done
+    log "Added $IPTABLES_RULES_ADDED iptables rules"
+fi
+
+# Set default-deny policy (this is the critical security step)
 iptables -P OUTPUT DROP
 iptables -P INPUT DROP
-rm -f "$(realpath "$0")"
+
+# Mark initialization as complete
+FIREWALL_INITIALIZED=true
+log "Firewall initialized successfully. Default policy: DROP"
