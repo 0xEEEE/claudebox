@@ -333,15 +333,15 @@ EOF
 
 get_profile_javascript() {
     cat << 'EOF'
+USER claude
 # Supply chain security: Use vendored nvm script with checksum verification
 COPY --chown=claude vendor/scripts/profiles/nvm-install.sh /tmp/nvm-install.sh
 COPY --chown=claude vendor/scripts/checksums-profiles.sha256 /tmp/checksums-profiles.sha256
 RUN cd /tmp && sha256sum -c checksums-profiles.sha256 --ignore-missing 2>/dev/null | grep -q "nvm-install.sh: OK" || (echo "Checksum verification failed for nvm-install.sh" && exit 1)
+ENV NVM_DIR="/home/claude/.nvm"
 RUN bash /tmp/nvm-install.sh
 RUN rm -f /tmp/nvm-install.sh /tmp/checksums-profiles.sha256
-ENV NVM_DIR="/home/claude/.nvm"
 RUN . $NVM_DIR/nvm.sh && nvm install --lts
-USER claude
 # Install typescript-language-server LSP for code intelligence
 RUN bash -c "source $NVM_DIR/nvm.sh && npm install -g typescript eslint prettier yarn pnpm typescript-language-server"
 USER root
