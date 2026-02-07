@@ -309,6 +309,15 @@ if [ "${CLAUDEBOX_HOST_SKILLS:-false}" = "true" ] && [ -d "/mnt/host-skills" ]; 
         fi
     }
 
+    # Clean up stale symlinks from previous container runs
+    for link in /home/DOCKERUSER/.claude/skills/*; do
+        [ -L "$link" ] || continue
+        # Remove if target no longer exists
+        if [ ! -e "$link" ]; then
+            rm -f "$link" 2>/dev/null || true
+        fi
+    done
+
     # Also ensure project skills are linked first (they take priority)
     # Skills can be directories or .md files
     if [ -d "/home/DOCKERUSER/.claudebox/skills" ]; then
@@ -340,21 +349,31 @@ if [ "${CLAUDEBOX_HOST_SKILLS:-false}" = "true" ] && [ -d "/mnt/host-skills" ]; 
             fi
 
             # Monitor mode (-m) for continuous watching
-            # Use create and moved_to events (works for both files and directories)
-            inotifywait -m -q -e create -e moved_to $watch_dirs 2>/dev/null |
+            # Watch create/moved_to for additions, delete/moved_from for removals
+            inotifywait -m -q -e create -e moved_to -e delete -e moved_from $watch_dirs 2>/dev/null |
             while read dir event name; do
                 [ -n "$name" ] || continue
                 target="/home/DOCKERUSER/.claude/skills/$name"
 
-                if [ "$dir" = "/home/DOCKERUSER/.claudebox/skills/" ]; then
-                    # Project skills: force overwrite (higher priority)
-                    runuser -u DOCKERUSER -- ln -sf "$dir$name" "$target" 2>/dev/null || true
-                else
-                    # Host skills: only create if not exists (lower priority)
-                    if [ ! -e "$target" ] && [ ! -L "$target" ]; then
-                        runuser -u DOCKERUSER -- ln -s "$dir$name" "$target" 2>/dev/null || true
-                    fi
-                fi
+                case "$event" in
+                    *DELETE*|*MOVED_FROM*)
+                        # Remove symlink when source is deleted
+                        if [ -L "$target" ]; then
+                            rm -f "$target" 2>/dev/null || true
+                        fi
+                        ;;
+                    *)
+                        if [ "$dir" = "/home/DOCKERUSER/.claudebox/skills/" ]; then
+                            # Project skills: force overwrite (higher priority)
+                            runuser -u DOCKERUSER -- ln -sf "$dir$name" "$target" 2>/dev/null || true
+                        else
+                            # Host skills: only create if not exists (lower priority)
+                            if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+                                runuser -u DOCKERUSER -- ln -s "$dir$name" "$target" 2>/dev/null || true
+                            fi
+                        fi
+                        ;;
+                esac
             done
         ) &
     fi
