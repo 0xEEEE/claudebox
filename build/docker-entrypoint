@@ -310,9 +310,10 @@ if [ "${CLAUDEBOX_HOST_SKILLS:-false}" = "true" ] && [ -d "/mnt/host-skills" ]; 
     }
 
     # Also ensure project skills are linked first (they take priority)
+    # Skills can be directories or .md files
     if [ -d "/home/DOCKERUSER/.claudebox/skills" ]; then
-        for skill in /home/DOCKERUSER/.claudebox/skills/*.md; do
-            [ -f "$skill" ] || continue
+        for skill in /home/DOCKERUSER/.claudebox/skills/*; do
+            [ -e "$skill" ] || continue
             skill_name=$(basename "$skill")
             target="/home/DOCKERUSER/.claude/skills/$skill_name"
             create_symlink_safe "$skill" "$target"
@@ -320,12 +321,43 @@ if [ "${CLAUDEBOX_HOST_SKILLS:-false}" = "true" ] && [ -d "/mnt/host-skills" ]; 
     fi
 
     # Then link host skills (lower priority - skips existing)
-    for skill in /mnt/host-skills/*.md; do
-        [ -f "$skill" ] || continue
+    # Skills can be directories or .md files
+    for skill in /mnt/host-skills/*; do
+        [ -e "$skill" ] || continue
         skill_name=$(basename "$skill")
         target="/home/DOCKERUSER/.claude/skills/$skill_name"
         create_symlink_safe "$skill" "$target"
     done
+
+    # Start background inotify watcher for real-time skills updates
+    # Monitors both host skills and project skills directories
+    if command -v inotifywait >/dev/null 2>&1; then
+        (
+            # Build list of directories to watch
+            watch_dirs="/mnt/host-skills"
+            if [ -d "/home/DOCKERUSER/.claudebox/skills" ]; then
+                watch_dirs="$watch_dirs /home/DOCKERUSER/.claudebox/skills"
+            fi
+
+            # Monitor mode (-m) for continuous watching
+            # Use create and moved_to events (works for both files and directories)
+            inotifywait -m -q -e create -e moved_to $watch_dirs 2>/dev/null |
+            while read dir event name; do
+                [ -n "$name" ] || continue
+                target="/home/DOCKERUSER/.claude/skills/$name"
+
+                if [ "$dir" = "/home/DOCKERUSER/.claudebox/skills/" ]; then
+                    # Project skills: force overwrite (higher priority)
+                    runuser -u DOCKERUSER -- ln -sf "$dir$name" "$target" 2>/dev/null || true
+                else
+                    # Host skills: only create if not exists (lower priority)
+                    if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+                        runuser -u DOCKERUSER -- ln -s "$dir$name" "$target" 2>/dev/null || true
+                    fi
+                fi
+            done
+        ) &
+    fi
 fi
 
 # Set up host plugins symlinks for LSP and other plugin access
