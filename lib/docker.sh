@@ -300,6 +300,10 @@ run_claudebox_container() {
     if [[ "$host_skills_enabled" == "true" ]] && [[ -d "$HOME/.claude/skills" ]]; then
         docker_args+=(-v "$HOME/.claude/skills":"/mnt/host-skills:ro")
         docker_args+=(-e "CLAUDEBOX_HOST_SKILLS=true")
+        # Mount ~/.agents/skills so relative symlinks in ~/.claude/skills/ resolve inside container
+        if [[ -d "$HOME/.agents/skills" ]]; then
+            docker_args+=(-v "$HOME/.agents/skills":"/.agents/skills:ro")
+        fi
         if [[ "$VERBOSE" == "true" ]]; then
             echo "[DEBUG] Mounting host skills from ~/.claude/skills" >&2
         fi
