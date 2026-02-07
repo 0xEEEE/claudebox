@@ -449,17 +449,8 @@ get_profile_bash() {
     cat << 'EOF'
 # Bash/Shell development profile
 RUN apt-get update && apt-get install -y shellcheck shfmt bats && apt-get clean
-# Install bun for better performance (used to run bash-language-server)
+# Install bash-language-server via bun (bun available from core image)
 USER claude
-# Supply chain security: Use vendored bun install script with checksum verification
-COPY --chown=claude vendor/scripts/profiles/bun-install.sh /tmp/bun-install.sh
-COPY --chown=claude vendor/scripts/checksums-profiles.sha256 /tmp/checksums-profiles.sha256
-RUN cd /tmp && sha256sum -c checksums-profiles.sha256 --ignore-missing 2>/dev/null | grep -q "bun-install.sh: OK" || (echo "Checksum verification failed for bun-install.sh" && exit 1)
-RUN bash /tmp/bun-install.sh
-RUN rm -f /tmp/bun-install.sh /tmp/checksums-profiles.sha256
-ENV BUN_INSTALL="/home/claude/.bun"
-ENV PATH="/home/claude/.bun/bin:$PATH"
-# Install bash-language-server via bun
 RUN bun install -g bash-language-server
 USER root
 # Create symlink for bash-language-server in /usr/local/bin so it's in PATH

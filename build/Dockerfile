@@ -88,6 +88,15 @@ ENV SHELL=/bin/zsh
 # Uses vendored script verified via checksums-base.sha256
 RUN bash /tmp/claude-install.sh
 
+# Install bun runtime (required by skills and some profiles)
+COPY --chown=$USERNAME vendor/scripts/profiles/bun-install.sh /tmp/bun-install.sh
+COPY --chown=$USERNAME vendor/scripts/checksums-profiles.sha256 /tmp/checksums-profiles.sha256
+RUN cd /tmp && sha256sum -c checksums-profiles.sha256 --ignore-missing 2>/dev/null | grep -q "bun-install.sh: OK" || (echo "Checksum verification failed for bun-install.sh" && exit 1)
+RUN bash /tmp/bun-install.sh
+RUN rm -f /tmp/bun-install.sh /tmp/checksums-profiles.sha256
+ENV BUN_INSTALL="/home/$USERNAME/.bun"
+ENV PATH="/home/$USERNAME/.bun/bin:$PATH"
+
 RUN cat >> ~/.zshrc <<'EOF'
 
 if [[ -n "$PS1" ]] && command -v stty >/dev/null; then
