@@ -68,6 +68,7 @@ RUN sh /tmp/zsh-setup-local.sh \
     -a 'setopt APPEND_HISTORY'
 
 RUN sh /tmp/uv-install.sh
+ENV PATH="/home/$USERNAME/.local/bin:$PATH"
 
 RUN echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && \
     echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
