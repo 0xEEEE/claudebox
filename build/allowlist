@@ -1,5 +1,5 @@
 # Default domains (always allowed):
-# api.anthropic.com, console.anthropic.com, statsig.anthropic.com, sentry.io
+# api.anthropic.com, console.anthropic.com, statsig.anthropic.com, sentry.io, storage.googleapis.com
 
 # GitHub.com
 github.com

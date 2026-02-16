@@ -49,6 +49,12 @@ if [ "${DISABLE_FIREWALL:-false}" = "true" ]; then
     exit 0
 fi
 
+# Skip firewall for rootless Podman (no NET_ADMIN capability)
+if [ "${CLAUDEBOX_RUNTIME_MODE:-docker}" = "podman-rootless" ]; then
+    log "Firewall not available in rootless Podman mode (no NET_ADMIN capability)"
+    exit 0
+fi
+
 log "Initializing firewall rules..."
 
 # Flush existing rules (ignore errors if no rules exist)
@@ -71,7 +77,7 @@ iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
 # Default allowed domains (Anthropic services)
-DEFAULT_DOMAINS="api.anthropic.com console.anthropic.com statsig.anthropic.com sentry.io"
+DEFAULT_DOMAINS="api.anthropic.com console.anthropic.com statsig.anthropic.com sentry.io storage.googleapis.com"
 
 ALLOWED_DOMAINS="$DEFAULT_DOMAINS"
 ALLOWLIST_FILE="/home/DOCKERUSER/.claudebox/allowlist"
