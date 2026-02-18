@@ -298,7 +298,7 @@ RUN ARCH=$(dpkg --print-architecture) && \
         GO_ARCH="amd64"; \
         GO_SHA256="$GO_SHA256_AMD64"; \
     fi && \
-    wget -O go.tar.gz "https://golang.org/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" && \
+    curl -fsSL -o go.tar.gz "https://golang.org/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" && \
     echo "${GO_SHA256}  go.tar.gz" | sha256sum -c - && \
     tar -C /usr/local -xzf go.tar.gz && \
     rm go.tar.gz
