@@ -55,3 +55,12 @@ registry.npmmirror.com
 
 # Bun
 registry.bun.sh
+
+# Go modules
+proxy.golang.org
+sum.golang.org
+
+# Rust (crates.io)
+crates.io
+static.crates.io
+index.crates.io
