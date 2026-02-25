@@ -42,3 +42,16 @@ bitbucket-pipelines-prod-eu-west-1.s3.amazonaws.com
 github-cloud.s3.amazonaws.com
 github-releases.githubusercontent.com
 github-production-release-asset-2e65be.s3.amazonaws.com
+
+# Python Package Index (pip/uv)
+pypi.org
+files.pythonhosted.org
+upload.pypi.org
+
+# Node.js / JavaScript (npm/yarn/pnpm)
+registry.npmjs.org
+registry.yarnpkg.com
+registry.npmmirror.com
+
+# Bun
+registry.bun.sh
