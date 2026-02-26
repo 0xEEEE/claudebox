@@ -67,12 +67,18 @@ if [ -n "$used_pct" ] && [ "$used_pct" != "null" ]; then
     in_fmt=$(fmt_tokens "${input_tokens:-0}")
     out_fmt=$(fmt_tokens "${output_tokens:-0}")
     cache_fmt=$(fmt_tokens "${cache_read:-0}")
-    if [ "${used_int:-0}" -ge 80 ]; then
+    RED='\033[31m'
+    ORANGE='\033[38;5;208m'
+    if [ "${used_int:-0}" -ge 95 ]; then
+        ctx_color="$RED"
+    elif [ "${used_int:-0}" -ge 80 ]; then
+        ctx_color="$ORANGE"
+    elif [ "${used_int:-0}" -ge 50 ]; then
         ctx_color="$YELLOW"
     else
         ctx_color="$DIM"
     fi
-    seg_ctx=$(printf "${ctx_color}[ctx:${used_pct%%.*}%% in:${in_fmt} out:${out_fmt} cache:${cache_fmt}]${RESET}")
+    seg_ctx=$(printf "[${ctx_color}ctx:${used_pct%%.*}%%${RESET} in:${in_fmt} out:${out_fmt} cache:${cache_fmt}]")
 fi
 
 # duration (convert ms to minutes:seconds)
@@ -95,27 +101,64 @@ if [ -n "$lines_added" ] && [ "$lines_added" != "null" ] && [ "$lines_added" != 
     seg_lines=$(printf "${GREEN}+${lines_added:-0}${RESET}/${YELLOW}-${lines_removed:-0}${RESET}")
 fi
 
+# git status
+if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    branch=$(git branch --show-current 2>/dev/null)
+    if [ -n "$branch" ]; then
+        staged=$(git diff --cached --numstat 2>/dev/null | wc -l | tr -d ' ')
+        modified=$(git diff --numstat 2>/dev/null | wc -l | tr -d ' ')
+        untracked=$(git ls-files --others --exclude-standard 2>/dev/null | wc -l | tr -d ' ')
+        git_info="${BLUE}${branch}${RESET}"
+        if [ "$staged" -gt 0 ]; then
+            git_info="${git_info} ${GREEN}+${staged}${RESET}"
+        fi
+        if [ "$modified" -gt 0 ]; then
+            git_info="${git_info} ${YELLOW}~${modified}${RESET}"
+        fi
+        if [ "$untracked" -gt 0 ]; then
+            git_info="${git_info} ${DIM}?${untracked}${RESET}"
+        fi
+        seg_git="$git_info"
+    fi
+fi
+
 # session name (if set)
 if [ -n "$session_name" ] && [ "$session_name" != "null" ]; then
     seg_session=$(printf "${MAGENTA}[${session_name}]${RESET}")
 fi
 
-# Assemble the line
-parts="${seg_dir}"
+# Assemble line 1: project | model | ctx
+line1="${seg_dir}"
 if [ -n "$seg_model" ]; then
-    parts="${parts} | ${seg_model}"
+    line1="${line1} | ${seg_model}"
 fi
 if [ -n "$seg_ctx" ]; then
-    parts="${parts} | ${seg_ctx}"
-fi
-if [ -n "${seg_time:-}" ]; then
-    parts="${parts} | ${seg_time}"
-fi
-if [ -n "${seg_lines:-}" ]; then
-    parts="${parts} | ${seg_lines}"
+    line1="${line1} | ${seg_ctx}"
 fi
 if [ -n "$seg_session" ]; then
-    parts="${parts} ${seg_session}"
+    line1="${line1} ${seg_session}"
 fi
+printf '%b\n' "$line1"
 
-printf '%b\n' "$parts"
+# Assemble line 2: time | lines | git
+line2=""
+if [ -n "${seg_time:-}" ]; then
+    line2="${seg_time}"
+fi
+if [ -n "${seg_lines:-}" ]; then
+    if [ -n "$line2" ]; then
+        line2="${line2} | ${seg_lines}"
+    else
+        line2="${seg_lines}"
+    fi
+fi
+if [ -n "${seg_git:-}" ]; then
+    if [ -n "$line2" ]; then
+        line2="${line2} | ${seg_git}"
+    else
+        line2="${seg_git}"
+    fi
+fi
+if [ -n "$line2" ]; then
+    printf '%b\n' "$line2"
+fi
