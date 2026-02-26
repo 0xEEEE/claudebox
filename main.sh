@@ -44,7 +44,7 @@ export VERBOSE=false
 LIB_DIR="${SCRIPT_DIR}/lib"
 
 # Load libraries in order - cli.sh must be loaded first for parsing
-for lib in cli common env os state project docker config commands welcome preflight; do
+for lib in cli common env os state project runtime docker config commands welcome preflight; do
     # shellcheck disable=SC1090
     source "${LIB_DIR}/${lib}.sh"
 done
@@ -78,8 +78,8 @@ main() {
     # Save original arguments for later use with saved flags
     local original_args=("$@")
     
-    # Enable BuildKit for all Docker operations
-    export DOCKER_BUILDKIT=1
+    # Detect container runtime (Docker or Podman)
+    detect_container_runtime
     
     # Step 1: Update symlink
     update_symlink
@@ -142,27 +142,31 @@ main() {
         exit $?
     fi
     
-    # Step 5: Docker checks
-    local docker_status
-    docker_status=$(check_docker; echo $?)
-    case $docker_status in
-        1) install_docker ;;
+    # Step 5: Container runtime checks
+    local runtime_status
+    runtime_status=$(check_runtime; echo $?)
+    case $runtime_status in
+        1) install_container_runtime ;;
         2)
-            warn "Docker is installed but not running."
-            case "$(uname -s)" in
-                Darwin)
-                    error "Docker Desktop is not running. Please start Docker Desktop from Applications."
-                    ;;
-                Linux)
-                    warn "Starting Docker requires sudo privileges..."
-                    sudo systemctl start docker
-                    docker info || error "Failed to start Docker"
-                    docker ps || configure_docker_nonroot
-                    ;;
-                *)
-                    error "Unsupported OS: $(uname -s)"
-                    ;;
-            esac
+            warn "$(runtime_cmd) is installed but not running."
+            if [[ "$CONTAINER_RUNTIME" == "docker" ]]; then
+                case "$(uname -s)" in
+                    Darwin)
+                        error "Docker Desktop is not running. Please start Docker Desktop from Applications."
+                        ;;
+                    Linux)
+                        warn "Starting Docker requires sudo privileges..."
+                        sudo systemctl start docker
+                        docker info || error "Failed to start Docker"
+                        docker ps || configure_docker_nonroot
+                        ;;
+                    *)
+                        error "Unsupported OS: $(uname -s)"
+                        ;;
+                esac
+            elif [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+                error "Podman is installed but not responding. Check 'podman info' for details."
+            fi
             ;;
         3)
             warn "Docker requires sudo. Setting up non-root access..."
@@ -172,7 +176,7 @@ main() {
     
     # Step 5a: Build core image if it doesn't exist
     local core_image="claudebox-core"
-    if ! docker image inspect "$core_image" >/dev/null 2>&1; then
+    if ! $(runtime_cmd) image inspect "$core_image" >/dev/null 2>&1; then
         # Show logo during build
         logo
         
@@ -186,6 +190,7 @@ main() {
         cp "${root_dir}/build/generate-tools-readme" "$build_context/generate-tools-readme" || error "Failed to copy generate-tools-readme"
         cp "${root_dir}/lib/tools-report.sh" "$build_context/tools-report.sh" || error "Failed to copy tools-report.sh"
         cp "${root_dir}/build/dockerignore" "$build_context/.dockerignore" || error "Failed to copy .dockerignore"
+        cp "${root_dir}/build/statusline.sh" "$build_context/statusline.sh" || error "Failed to copy statusline.sh"
         chmod +x "$build_context/docker-entrypoint.sh" "$build_context/init-firewall" "$build_context/generate-tools-readme"
 
         # Copy vendored scripts for supply chain security
@@ -210,11 +215,25 @@ main() {
         echo "$core_dockerfile_content" > "$core_dockerfile"
         
         # Build core image
-        docker build \
-            --progress=${BUILDKIT_PROGRESS:-auto} \
-            --build-arg BUILDKIT_INLINE_CACHE=1 \
-            --build-arg USER_ID="$USER_ID" \
-            --build-arg GROUP_ID="$GROUP_ID" \
+        local build_cmd_args=()
+        if [[ "$RUNTIME_HAS_BUILDKIT" == "true" ]]; then
+            export DOCKER_BUILDKIT=1
+            build_cmd_args+=(--progress="${BUILDKIT_PROGRESS:-auto}")
+            build_cmd_args+=(--build-arg "BUILDKIT_INLINE_CACHE=1")
+        fi
+
+        # For rootless Podman, use fixed UID/GID 1000
+        local build_uid="$USER_ID"
+        local build_gid="$GROUP_ID"
+        if [[ "$CONTAINER_RUNTIME_MODE" == "podman-rootless" ]]; then
+            build_uid=1000
+            build_gid=1000
+        fi
+
+        $(runtime_cmd) build \
+            ${build_cmd_args[@]+"${build_cmd_args[@]}"} \
+            --build-arg USER_ID="$build_uid" \
+            --build-arg GROUP_ID="$build_gid" \
             --build-arg USERNAME="$DOCKER_USER" \
             --build-arg DELTA_VERSION="$DELTA_VERSION" \
             -f "$core_dockerfile" -t "$core_image" "$build_context" || error "Failed to build core image"
@@ -301,9 +320,9 @@ main() {
     if [[ "$rebuild_requested" == "true" ]]; then
         warn "Forcing full rebuild of ClaudeBox Docker image..."
         rm -f "$PROJECT_PARENT_DIR/.docker_layer_checksums"
-        docker rmi -f "$IMAGE_NAME" 2>/dev/null || true
+        $(runtime_cmd) rmi -f "$IMAGE_NAME" 2>/dev/null || true
     fi
-    
+
     # Step 9: Run pre-flight validation for commands that need Docker
     if [[ -n "${CLI_SCRIPT_COMMAND}" ]]; then
         local cmd_req=$(get_command_requirements "${CLI_SCRIPT_COMMAND}")
@@ -345,7 +364,7 @@ main() {
         # Check if rebuild needed
         local need_rebuild=false
         
-        if [[ "${REBUILD:-false}" == "true" ]] || ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+        if [[ "${REBUILD:-false}" == "true" ]] || ! $(runtime_cmd) image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
             need_rebuild=true
         elif needs_docker_rebuild "$PROJECT_DIR" "$IMAGE_NAME"; then
             need_rebuild=true
@@ -386,11 +405,11 @@ main() {
                     docker_profiles_hash=$(printf '%s\n' "${docker_profiles[@]}" | sort | cksum | cut -d' ' -f1)
                 fi
                 
-                local image_profiles_hash=$(docker inspect "$IMAGE_NAME" --format '{{index .Config.Labels "claudebox.profiles"}}' 2>/dev/null || echo "")
+                local image_profiles_hash=$($(runtime_cmd) inspect "$IMAGE_NAME" --format '{{index .Config.Labels "claudebox.profiles"}}' 2>/dev/null || echo "")
                 
                 if [[ "$docker_profiles_hash" != "$image_profiles_hash" ]]; then
                     info "Docker-affecting profiles changed, rebuilding..."
-                    docker rmi -f "$IMAGE_NAME" 2>/dev/null || true
+                    $(runtime_cmd) rmi -f "$IMAGE_NAME" 2>/dev/null || true
                     need_rebuild=true
                 fi
             fi

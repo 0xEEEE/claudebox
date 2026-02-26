@@ -28,6 +28,16 @@ else
 fi
 export DISABLE_FIREWALL
 
+# Helper: run a command as the container user.
+# In rootless Podman, we are already the user, so runuser is not needed.
+run_as_user() {
+    if [ "${CLAUDEBOX_RUNTIME_MODE:-docker}" = "podman-rootless" ]; then
+        "$@"
+    else
+        runuser -u DOCKERUSER -- "$@"
+    fi
+}
+
 # Debug output (check environment variable)
 if [[ "${VERBOSE:-false}" == "true" ]]; then
     echo "DEBUG: Arguments: $@" >&2
@@ -35,15 +45,107 @@ if [[ "${VERBOSE:-false}" == "true" ]]; then
     echo "DEBUG: ENABLE_SUDO=$ENABLE_SUDO" >&2
     echo "DEBUG: DISABLE_FIREWALL=$DISABLE_FIREWALL" >&2
     echo "DEBUG: SHELL_MODE=$SHELL_MODE" >&2
+    echo "DEBUG: CLAUDEBOX_RUNTIME_MODE=${CLAUDEBOX_RUNTIME_MODE:-docker}" >&2
 fi
 
-if [ -f /home/DOCKERUSER/init-firewall ]; then
+# Initialize firewall (skip for rootless Podman — no NET_ADMIN capability)
+if [ "${CLAUDEBOX_RUNTIME_MODE:-docker}" = "podman-rootless" ]; then
+    if [[ "${VERBOSE:-false}" == "true" ]]; then
+        echo "DEBUG: Skipping firewall init (rootless Podman)" >&2
+    fi
+elif [ -f /home/DOCKERUSER/init-firewall ]; then
     /home/DOCKERUSER/init-firewall || true
+fi
+
+# Start background inotify watcher for allowlist hot-reload
+# Monitors the allowlist file and adds new domains to firewall rules without restart
+if command -v inotifywait >/dev/null 2>&1 && [ "${DISABLE_FIREWALL:-false}" != "true" ] && \
+   [ "${CLAUDEBOX_RUNTIME_MODE:-docker}" != "podman-rootless" ]; then
+    ALLOWLIST_FILE="/home/DOCKERUSER/.claudebox/allowlist"
+    if [ -f "$ALLOWLIST_FILE" ]; then
+        (
+            APPLIED_FILE="/tmp/.firewall-applied-domains"
+            VALID_REGEX='^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?(/[0-9]+)?$'
+
+            # Snapshot currently applied domains
+            grep -v '^#' "$ALLOWLIST_FILE" 2>/dev/null | grep -v '^$' | sed 's/^\*\.//' | xargs -n1 2>/dev/null | sort -u > "$APPLIED_FILE" 2>/dev/null || true
+
+            # Detect ipset or iptables mode
+            USE_IPSET=false
+            if ipset list allowed-domains >/dev/null 2>&1; then
+                USE_IPSET=true
+            fi
+
+            inotifywait -m -q -e modify -e close_write "$ALLOWLIST_FILE" 2>/dev/null |
+            while read path event file; do
+                # Parse current allowlist into new domain list
+                NEW_DOMAINS=$(grep -v '^#' "$ALLOWLIST_FILE" 2>/dev/null | grep -v '^$' | sed 's/^\*\.//' | xargs -n1 2>/dev/null | sort -u)
+
+                # Find domains to add (in new but not in applied)
+                ADDED=$(comm -23 <(echo "$NEW_DOMAINS") "$APPLIED_FILE" 2>/dev/null) || true
+                # Find domains to remove (in applied but not in new)
+                REMOVED=$(comm -13 <(echo "$NEW_DOMAINS") "$APPLIED_FILE" 2>/dev/null) || true
+
+                [ -n "$ADDED" ] || [ -n "$REMOVED" ] || continue
+
+                # Add new domains
+                for domain in $ADDED; do
+                    if ! echo "$domain" | grep -qE "$VALID_REGEX"; then
+                        continue
+                    fi
+                    if echo "$domain" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$'; then
+                        if [ "$USE_IPSET" = "true" ]; then
+                            ipset add allowed-ips "$domain" 2>/dev/null || true
+                        else
+                            iptables -I OUTPUT -d "$domain" -j ACCEPT 2>/dev/null || true
+                        fi
+                    else
+                        ips=$(getent hosts "$domain" 2>/dev/null | awk '{print $1}') || true
+                        for ip in $ips; do
+                            if [ "$USE_IPSET" = "true" ]; then
+                                ipset add allowed-domains "$ip" 2>/dev/null || true
+                            else
+                                iptables -I OUTPUT -d "$ip" -j ACCEPT 2>/dev/null || true
+                            fi
+                        done
+                    fi
+                done
+
+                # Remove deleted domains
+                for domain in $REMOVED; do
+                    if echo "$domain" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$'; then
+                        if [ "$USE_IPSET" = "true" ]; then
+                            ipset del allowed-ips "$domain" 2>/dev/null || true
+                        else
+                            iptables -D OUTPUT -d "$domain" -j ACCEPT 2>/dev/null || true
+                        fi
+                    else
+                        ips=$(getent hosts "$domain" 2>/dev/null | awk '{print $1}') || true
+                        for ip in $ips; do
+                            if [ "$USE_IPSET" = "true" ]; then
+                                ipset del allowed-domains "$ip" 2>/dev/null || true
+                            else
+                                iptables -D OUTPUT -d "$ip" -j ACCEPT 2>/dev/null || true
+                            fi
+                        done
+                    fi
+                done
+
+                # Update applied snapshot
+                echo "$NEW_DOMAINS" > "$APPLIED_FILE" 2>/dev/null || true
+            done
+        ) &
+    fi
 fi
 
 # Handle sudo access based on --enable-sudo flag
 # Sudoers entry is created ONLY at runtime when explicitly requested
-if [ "$ENABLE_SUDO" = "true" ]; then
+if [ "${CLAUDEBOX_RUNTIME_MODE:-docker}" = "podman-rootless" ]; then
+    # Rootless Podman: sudo is not available
+    if [ "$ENABLE_SUDO" = "true" ]; then
+        echo "WARNING: --enable-sudo has no effect in rootless Podman mode" >&2
+    fi
+elif [ "$ENABLE_SUDO" = "true" ]; then
     # Create sudoers entry only when --enable-sudo is passed
     echo "DOCKERUSER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/DOCKERUSER
     chmod 0440 /etc/sudoers.d/DOCKERUSER
@@ -79,16 +181,16 @@ if [ -n "${CLAUDEBOX_PROJECT_NAME:-}" ]; then
             # Check if venv exists but flag is missing (incomplete previous run)
             if [ -d "$VENV_DIR" ] && [ ! -f "$VENV_FLAG" ]; then
                 # Try to acquire lock for recreating corrupted venv
-                if runuser -u DOCKERUSER -- mkdir -p "$(dirname "$VENV_FLAG")" && runuser -u DOCKERUSER -- mkdir "$VENV_FLAG.lock" 2>/dev/null; then
+                if run_as_user mkdir -p "$(dirname "$VENV_FLAG")" && run_as_user mkdir "$VENV_FLAG.lock" 2>/dev/null; then
                     # We got the lock, recreate venv with --clear
                     echo "[entrypoint] Recreating venv (incomplete previous run detected)..." >&2
-                    PATH="/home/DOCKERUSER/.local/bin:$PATH" runuser -u DOCKERUSER -- uv venv --python-preference managed --clear "$VENV_DIR" || {
+                    PATH="/home/DOCKERUSER/.local/bin:$PATH" run_as_user uv venv --python-preference managed --clear "$VENV_DIR" || {
                         echo "[entrypoint] ERROR: Failed to recreate venv" >&2
                     }
 
                     # Remove lock and create flag to indicate completion
-                    runuser -u DOCKERUSER -- rmdir "$VENV_FLAG.lock"
-                    runuser -u DOCKERUSER -- touch "$VENV_FLAG"
+                    run_as_user rmdir "$VENV_FLAG.lock"
+                    run_as_user touch "$VENV_FLAG"
                 else
                     # Someone else is fixing it, wait for completion with exponential backoff
                     wait_count=0
@@ -111,18 +213,18 @@ if [ -n "${CLAUDEBOX_PROJECT_NAME:-}" ]; then
                 fi
             else
                 # Normal case - try to create new venv
-                if runuser -u DOCKERUSER -- mkdir -p "$(dirname "$VENV_FLAG")" && runuser -u DOCKERUSER -- mkdir "$VENV_FLAG.lock" 2>/dev/null; then
+                if run_as_user mkdir -p "$(dirname "$VENV_FLAG")" && run_as_user mkdir "$VENV_FLAG.lock" 2>/dev/null; then
                     # We got the lock, create venv if needed
                     if [ ! -d "$VENV_DIR" ]; then
                         echo "[entrypoint] Creating Python venv..." >&2
-                        PATH="/home/DOCKERUSER/.local/bin:$PATH" runuser -u DOCKERUSER -- uv venv --python-preference managed "$VENV_DIR" || {
+                        PATH="/home/DOCKERUSER/.local/bin:$PATH" run_as_user uv venv --python-preference managed "$VENV_DIR" || {
                             echo "[entrypoint] ERROR: Failed to create venv" >&2
                         }
                     fi
 
                     # Remove lock and create flag to indicate completion
-                    runuser -u DOCKERUSER -- rmdir "$VENV_FLAG.lock"
-                    runuser -u DOCKERUSER -- touch "$VENV_FLAG"
+                    run_as_user rmdir "$VENV_FLAG.lock"
+                    run_as_user touch "$VENV_FLAG"
                 else
                     # Someone else is creating it, wait for completion with exponential backoff
                     wait_count=0
@@ -186,12 +288,12 @@ if [ -n "${CLAUDEBOX_PROJECT_NAME:-}" ]; then
                 if [ -n "$python_packages" ]; then
                     echo "[entrypoint] Installing Python dev tools..." >&2
                     # Note: $python_packages is intentionally unquoted to allow word splitting for pip
-                    if PATH="/home/DOCKERUSER/.local/bin:$PATH" runuser -u DOCKERUSER -- bash -c "
+                    if PATH="/home/DOCKERUSER/.local/bin:$PATH" run_as_user bash -c "
                         source \"$VENV_DIR/bin/activate\"
                         uv pip install $python_packages
                     "; then
                         # Create .pydev_flag to indicate Python dev tools are deployed
-                        runuser -u DOCKERUSER -- touch "$PYDEV_FLAG"
+                        run_as_user touch "$PYDEV_FLAG"
                         echo "[entrypoint] Python dev tools installed successfully" >&2
                     else
                         echo "[entrypoint] ERROR: Failed to install some Python packages" >&2
@@ -233,9 +335,9 @@ if [ -n "${CLAUDEBOX_PROJECT_NAME:-}" ]; then
         
         if [ "$NEED_REGENERATE" = "true" ]; then
             # Generate the tooling file as the docker user
-            if runuser -u DOCKERUSER -- generate-tools-readme >/dev/null 2>&1; then
+            if run_as_user generate-tools-readme >/dev/null 2>&1; then
                 # Store the checksum as the docker user
-                runuser -u DOCKERUSER -- bash -c "echo '$CURRENT_CHECKSUM' > '$CHECKSUM_FILE'"
+                run_as_user bash -c "echo '$CURRENT_CHECKSUM' > '$CHECKSUM_FILE'"
             fi
         fi
     fi
@@ -247,12 +349,12 @@ cd /home/DOCKERUSER
 # Security: Never mount host's ~/.ssh - only use SSH agent socket
 # This creates a minimal SSH config with GitHub's host keys
 if [ ! -d "/home/DOCKERUSER/.ssh" ]; then
-    runuser -u DOCKERUSER -- mkdir -p "/home/DOCKERUSER/.ssh"
-    runuser -u DOCKERUSER -- chmod 700 "/home/DOCKERUSER/.ssh"
+    run_as_user mkdir -p "/home/DOCKERUSER/.ssh"
+    run_as_user chmod 700 "/home/DOCKERUSER/.ssh"
 fi
 
 if [ ! -f "/home/DOCKERUSER/.ssh/config" ]; then
-    runuser -u DOCKERUSER -- tee "/home/DOCKERUSER/.ssh/config" > /dev/null << 'SSHCONFIG'
+    run_as_user tee "/home/DOCKERUSER/.ssh/config" > /dev/null << 'SSHCONFIG'
 # ClaudeBox default SSH configuration
 # Only GitHub is configured by default for security
 
@@ -268,25 +370,43 @@ Host gist.github.com
     IdentitiesOnly yes
     AddKeysToAgent yes
 SSHCONFIG
-    runuser -u DOCKERUSER -- chmod 600 "/home/DOCKERUSER/.ssh/config"
+    run_as_user chmod 600 "/home/DOCKERUSER/.ssh/config"
 fi
 
 # Add GitHub's SSH host keys to known_hosts (prevents MITM warnings)
 if [ ! -f "/home/DOCKERUSER/.ssh/known_hosts" ]; then
-    runuser -u DOCKERUSER -- tee "/home/DOCKERUSER/.ssh/known_hosts" > /dev/null << 'KNOWNHOSTS'
+    run_as_user tee "/home/DOCKERUSER/.ssh/known_hosts" > /dev/null << 'KNOWNHOSTS'
 # GitHub's SSH host keys (from https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints)
 github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
 github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
 github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
 KNOWNHOSTS
-    runuser -u DOCKERUSER -- chmod 600 "/home/DOCKERUSER/.ssh/known_hosts"
+    run_as_user chmod 600 "/home/DOCKERUSER/.ssh/known_hosts"
+fi
+
+# Copy default statusline if not already configured
+DEFAULT_STATUSLINE="/usr/local/lib/claudebox/statusline.sh"
+USER_STATUSLINE="/home/DOCKERUSER/.claude/statusline.sh"
+USER_SETTINGS="/home/DOCKERUSER/.claude/settings.json"
+if [ -f "$DEFAULT_STATUSLINE" ] && [ ! -f "$USER_STATUSLINE" ]; then
+    run_as_user mkdir -p "/home/DOCKERUSER/.claude"
+    run_as_user cp "$DEFAULT_STATUSLINE" "$USER_STATUSLINE"
+    run_as_user chmod +x "$USER_STATUSLINE"
+    # Add statusLine config to settings.json if not present
+    if [ -f "$USER_SETTINGS" ]; then
+        if ! grep -q '"statusLine"' "$USER_SETTINGS" 2>/dev/null; then
+            run_as_user bash -c "jq '. + {\"statusLine\":{\"type\":\"command\",\"command\":\"~/.claude/statusline.sh\",\"padding\":2}}' \"$USER_SETTINGS\" > \"${USER_SETTINGS}.tmp\" && mv \"${USER_SETTINGS}.tmp\" \"$USER_SETTINGS\""
+        fi
+    else
+        run_as_user bash -c "printf '{\"statusLine\":{\"type\":\"command\",\"command\":\"~/.claude/statusline.sh\",\"padding\":2}}\n' > \"$USER_SETTINGS\""
+    fi
 fi
 
 # Set up host skills symlinks (applies to both shell and claude modes)
 # This is done as root before switching to user
 if [ "${CLAUDEBOX_HOST_SKILLS:-false}" = "true" ] && [ -d "/mnt/host-skills" ]; then
     # Ensure ~/.claude/skills exists
-    runuser -u DOCKERUSER -- mkdir -p "/home/DOCKERUSER/.claude/skills"
+    run_as_user mkdir -p "/home/DOCKERUSER/.claude/skills"
 
     # Security fix: Use atomic symlink creation to prevent TOCTOU race condition
     # Create symlink with temp name, then atomically rename
@@ -301,8 +421,8 @@ if [ "${CLAUDEBOX_HOST_SKILLS:-false}" = "true" ] && [ -d "/mnt/host-skills" ]; 
         fi
 
         # Create temp symlink and atomically rename
-        if runuser -u DOCKERUSER -- ln -s "$source" "$temp_link" 2>/dev/null; then
-            if ! runuser -u DOCKERUSER -- mv -n "$temp_link" "$target" 2>/dev/null; then
+        if run_as_user ln -s "$source" "$temp_link" 2>/dev/null; then
+            if ! run_as_user mv -n "$temp_link" "$target" 2>/dev/null; then
                 # mv -n failed (target appeared), clean up
                 rm -f "$temp_link"
             fi
@@ -365,11 +485,11 @@ if [ "${CLAUDEBOX_HOST_SKILLS:-false}" = "true" ] && [ -d "/mnt/host-skills" ]; 
                     *)
                         if [ "$dir" = "/home/DOCKERUSER/.claudebox/skills/" ]; then
                             # Project skills: force overwrite (higher priority)
-                            runuser -u DOCKERUSER -- ln -sf "$dir$name" "$target" 2>/dev/null || true
+                            run_as_user ln -sf "$dir$name" "$target" 2>/dev/null || true
                         else
                             # Host skills: only create if not exists (lower priority)
                             if [ ! -e "$target" ] && [ ! -L "$target" ]; then
-                                runuser -u DOCKERUSER -- ln -s "$dir$name" "$target" 2>/dev/null || true
+                                run_as_user ln -s "$dir$name" "$target" 2>/dev/null || true
                             fi
                         fi
                         ;;
@@ -384,16 +504,16 @@ fi
 if [ "${CLAUDEBOX_HOST_LSP:-false}" = "true" ] && [ -d "/mnt/host-plugins" ]; then
     # Symlink the entire plugins directory if it doesn't exist
     if [ ! -e "/home/DOCKERUSER/.claude/plugins" ]; then
-        runuser -u DOCKERUSER -- mkdir -p "/home/DOCKERUSER/.claude"
+        run_as_user mkdir -p "/home/DOCKERUSER/.claude"
         # Security fix: Use atomic symlink creation
         temp_link="/home/DOCKERUSER/.claude/plugins.tmp.$$"
-        if runuser -u DOCKERUSER -- ln -s "/mnt/host-plugins" "$temp_link" 2>/dev/null; then
-            runuser -u DOCKERUSER -- mv -n "$temp_link" "/home/DOCKERUSER/.claude/plugins" 2>/dev/null || rm -f "$temp_link"
+        if run_as_user ln -s "/mnt/host-plugins" "$temp_link" 2>/dev/null; then
+            run_as_user mv -n "$temp_link" "/home/DOCKERUSER/.claude/plugins" 2>/dev/null || rm -f "$temp_link"
         fi
     elif [ -d "/home/DOCKERUSER/.claude/plugins" ] && [ ! -L "/home/DOCKERUSER/.claude/plugins" ]; then
         # If plugins dir exists but is not a symlink, merge by symlinking cache contents
         if [ -d "/mnt/host-plugins/cache" ]; then
-            runuser -u DOCKERUSER -- mkdir -p "/home/DOCKERUSER/.claude/plugins/cache"
+            run_as_user mkdir -p "/home/DOCKERUSER/.claude/plugins/cache"
             for plugin_dir in /mnt/host-plugins/cache/*/; do
                 [ -d "$plugin_dir" ] || continue
                 plugin_name=$(basename "$plugin_dir")
@@ -408,7 +528,7 @@ fi
 # These are plugins that ship with claudebox
 if [ "${CLAUDEBOX_BUNDLED_PLUGINS:-false}" = "true" ] && [ -d "/mnt/claudebox-plugins" ]; then
     # Ensure plugins directory exists
-    runuser -u DOCKERUSER -- mkdir -p "/home/DOCKERUSER/.claude/plugins"
+    run_as_user mkdir -p "/home/DOCKERUSER/.claude/plugins"
 
     # Symlink each bundled plugin using safe atomic operation
     for plugin_dir in /mnt/claudebox-plugins/*/; do
@@ -439,17 +559,27 @@ exec /bin/zsh
 EOF
         chmod +x /tmp/tmux-init.sh
         sed -i "s|DOCKERUSER|$DOCKERUSER|g" /tmp/tmux-init.sh
-        exec runuser -u DOCKERUSER -- bash -c "cd /workspace && exec tmux new-session /tmp/tmux-init.sh"
+        if [ "${CLAUDEBOX_RUNTIME_MODE:-docker}" = "podman-rootless" ]; then
+            export HOME="/home/DOCKERUSER"
+            exec bash -c "cd /workspace && exec tmux new-session /tmp/tmux-init.sh"
+        else
+            exec runuser -u DOCKERUSER -- bash -c "cd /workspace && exec tmux new-session /tmp/tmux-init.sh"
+        fi
     else
         # For non-tmux, show logo before starting shell
-        exec runuser -u DOCKERUSER -- bash -c "export PATH=\"/home/DOCKERUSER/.local/bin:\$PATH\" && [ -d /home/DOCKERUSER/.claudebox/.venv ] && export PATH=\"/home/DOCKERUSER/.claudebox/.venv/bin:\$PATH\" && export VIRTUAL_ENV=\"/home/DOCKERUSER/.claudebox/.venv\"; cd /workspace && source /home/DOCKERUSER/.claudebox/common.sh 2>/dev/null && logo_header 2>/dev/null; exec /bin/zsh"
+        if [ "${CLAUDEBOX_RUNTIME_MODE:-docker}" = "podman-rootless" ]; then
+            export HOME="/home/DOCKERUSER"
+            exec bash -c "export PATH=\"/home/DOCKERUSER/.local/bin:\$PATH\" && [ -d /home/DOCKERUSER/.claudebox/.venv ] && export PATH=\"/home/DOCKERUSER/.claudebox/.venv/bin:\$PATH\" && export VIRTUAL_ENV=\"/home/DOCKERUSER/.claudebox/.venv\"; cd /workspace && source /home/DOCKERUSER/.claudebox/common.sh 2>/dev/null && logo_header 2>/dev/null; exec /bin/zsh"
+        else
+            exec runuser -u DOCKERUSER -- bash -c "export PATH=\"/home/DOCKERUSER/.local/bin:\$PATH\" && [ -d /home/DOCKERUSER/.claudebox/.venv ] && export PATH=\"/home/DOCKERUSER/.claudebox/.venv/bin:\$PATH\" && export VIRTUAL_ENV=\"/home/DOCKERUSER/.claudebox/.venv\"; cd /workspace && source /home/DOCKERUSER/.claudebox/common.sh 2>/dev/null && logo_header 2>/dev/null; exec /bin/zsh"
+        fi
     fi
 else
     # Claude mode - handle wrapper logic directly here
     if [[ "${1:-}" == "update" ]]; then
         # Special update handling - pass all arguments
         shift  # Remove "update" from arguments
-        exec runuser -u DOCKERUSER -- bash -c '
+        _update_script='
             export PATH="$HOME/.local/bin:$PATH"
 
             cd /workspace
@@ -474,9 +604,15 @@ else
                 claude --version
             fi
         '
+        if [ "${CLAUDEBOX_RUNTIME_MODE:-docker}" = "podman-rootless" ]; then
+            export HOME="/home/DOCKERUSER"
+            exec bash -c "$_update_script"
+        else
+            exec runuser -u DOCKERUSER -- bash -c "$_update_script"
+        fi
     else
         # Regular DOCKERUSER execution
-        exec runuser -u DOCKERUSER -- bash -c '
+        _claude_script='
             # Ensure uv and claude are in PATH
             export PATH="$HOME/.local/bin:$PATH"
 
@@ -485,12 +621,12 @@ else
             if [[ -f "${ANTHROPIC_API_KEY_FILE:-}" ]]; then
                 export ANTHROPIC_API_KEY=$(cat "$ANTHROPIC_API_KEY_FILE")
             fi
-            
+
             # Activate Python venv if it exists
             if [ -f "$HOME/.claudebox/.venv/bin/activate" ]; then
                 source "$HOME/.claudebox/.venv/bin/activate"
             fi
-            
+
             # Note: Host skills and project commands are already symlinked
             # at container startup (before this script runs as user)
 
@@ -523,7 +659,7 @@ else
                     printf "Loading project MCP servers\n" >&2
                 fi
             fi
-            
+
             # If no arguments and stdin is a terminal, run claude in interactive mode
             # Bash 3.2 safe array expansion for plugin_args and mcp_config_args
             if [[ "${CLAUDEBOX_WRAP_TMUX:-false}" == "true" ]]; then
@@ -541,7 +677,7 @@ else
                     claude ${plugin_args[@]+"${plugin_args[@]}"} ${mcp_config_args[@]+"${mcp_config_args[@]}"} "$@"
                 fi
             fi
-            
+
             # After claude exits, copy .claude.json if it was created
             # Security fix: Validate CLAUDEBOX_SLOT_NAME to prevent path traversal
             if [[ -n "${CLAUDEBOX_SLOT_NAME:-}" ]] && [[ "$CLAUDEBOX_SLOT_NAME" =~ ^[a-f0-9_-]+$ ]]; then
@@ -549,6 +685,12 @@ else
                     cp "$HOME/.claude.json" "$HOME/.claudebox/${CLAUDEBOX_SLOT_NAME}/.claude.json"
                 fi
             fi
-        ' -- "$@"
+        '
+        if [ "${CLAUDEBOX_RUNTIME_MODE:-docker}" = "podman-rootless" ]; then
+            export HOME="/home/DOCKERUSER"
+            exec bash -c "$_claude_script" -- "$@"
+        else
+            exec runuser -u DOCKERUSER -- bash -c "$_claude_script" -- "$@"
+        fi
     fi
 fi

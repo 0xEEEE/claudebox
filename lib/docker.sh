@@ -3,10 +3,8 @@
 
 # Docker checks
 check_docker() {
-    command -v docker >/dev/null || return 1
-    docker info >/dev/null 2>&1 || return 2
-    docker ps >/dev/null 2>&1 || return 3
-    return 0
+    # Delegate to runtime-aware check
+    check_runtime
 }
 
 install_docker() {
@@ -70,11 +68,16 @@ configure_docker_nonroot() {
 }
 
 docker_exec_root() {
-    docker exec -u root "$@"
+    if [[ "$CONTAINER_RUNTIME_MODE" == "podman-rootless" ]]; then
+        # In rootless Podman, the user is already effectively root inside
+        $(runtime_cmd) exec "$@"
+    else
+        $(runtime_cmd) exec -u root "$@"
+    fi
 }
 
 docker_exec_user() {
-    docker exec -u "$DOCKER_USER" "$@"
+    $(runtime_cmd) exec -u "$DOCKER_USER" "$@"
 }
 
 # run_claudebox_container - Main entry point for container execution
@@ -101,14 +104,14 @@ run_claudebox_container() {
         fillbar
         
         # Wait for container to be ready
-        while ! docker exec "$container_name" true ; do
+        while ! $(runtime_cmd) exec "$container_name" true ; do
             sleep 0.1
         done
-        
+
         fillbar stop
-        
+
         # Attach to ready container
-        docker attach "$container_name"
+        $(runtime_cmd) attach "$container_name"
         
         return
     fi
@@ -350,7 +353,39 @@ run_claudebox_container() {
             echo "[DEBUG] Mounting .env file from project directory" >&2
         fi
     fi
-    
+
+    # Custom volume mounts from mounts.conf
+    local custom_mounts_file="$PROJECT_PARENT_DIR/mounts.conf"
+    if [[ -f "$custom_mounts_file" ]]; then
+        while IFS= read -r mount_line; do
+            # Skip comments and empty lines
+            if [[ -z "$mount_line" ]]; then
+                continue
+            fi
+            if [[ "$mount_line" =~ ^# ]]; then
+                continue
+            fi
+            # Trim whitespace
+            mount_line="$(printf '%s' "$mount_line" | xargs)"
+            if [[ -z "$mount_line" ]]; then
+                continue
+            fi
+            # Expand ~ to HOME
+            mount_line="${mount_line/#\~/$HOME}"
+            # Extract host path (before first colon)
+            local host_path="${mount_line%%:*}"
+            # Validate host path exists
+            if [[ ! -e "$host_path" ]]; then
+                printf '[WARN] Custom mount skipped (not found): %s\n' "$host_path" >&2
+                continue
+            fi
+            docker_args+=(-v "$mount_line")
+            if [[ "$VERBOSE" == "true" ]]; then
+                printf '[DEBUG] Custom mount: %s\n' "$mount_line" >&2
+            fi
+        done < "$custom_mounts_file"
+    fi
+
     # Parse and prepare MCP servers for native --mcp-config support
     # Check for jq dependency first - fail fast with clear error message
     if ! command -v jq >/dev/null 2>&1; then
@@ -488,14 +523,26 @@ run_claudebox_container() {
         -e "NODE_ENV=${NODE_ENV:-production}"
         -e "CLAUDEBOX_PROJECT_NAME=$project_name"
         -e "CLAUDEBOX_SLOT_NAME=$slot_name"
+        -e "CLAUDEBOX_RUNTIME_MODE=${CONTAINER_RUNTIME_MODE}"
         -e "TERM=${TERM:-xterm-256color}"
         -e "VERBOSE=${VERBOSE:-false}"
         -e "CLAUDEBOX_WRAP_TMUX=${CLAUDEBOX_WRAP_TMUX:-false}"
         -e "CLAUDEBOX_PANE_NAME=${CLAUDEBOX_PANE_NAME:-}"
         -e "CLAUDEBOX_TMUX_PANE=${CLAUDEBOX_TMUX_PANE:-}"
-        --cap-add NET_ADMIN
-        --cap-add NET_RAW
     )
+
+    # Add network capabilities only when firewall is supported
+    if [[ "$RUNTIME_HAS_FIREWALL" == "true" ]]; then
+        docker_args+=(
+            --cap-add NET_ADMIN
+            --cap-add NET_RAW
+        )
+    fi
+
+    # For rootless Podman, map container user to host user
+    if [[ "$CONTAINER_RUNTIME_MODE" == "podman-rootless" ]]; then
+        docker_args+=(--userns=keep-id)
+    fi
 
     # Security fix: Add resource limits to prevent DoS
     # These can be overridden via environment variables
@@ -536,10 +583,10 @@ run_claudebox_container() {
             fi
         done
         # Bash 3.2 safe array expansion
-        echo "[DEBUG] Docker run command: docker run ${sanitized_args[*]+${sanitized_args[*]}}" >&2
+        echo "[DEBUG] Container run command: $(runtime_cmd) run ${sanitized_args[*]+${sanitized_args[*]}}" >&2
     fi
     # Bash 3.2 safe array expansion
-    docker run ${docker_args[@]+"${docker_args[@]}"}
+    $(runtime_cmd) run ${docker_args[@]+"${docker_args[@]}"}
     local exit_code=$?
     
     return $exit_code
@@ -549,9 +596,9 @@ check_container_exists() {
     local container_name="$1"
     
     # Check if container exists (running or stopped)
-    if docker ps -a --filter "name=^${container_name}$" --format "{{.Names}}"  | grep -q "^${container_name}$"; then
+    if $(runtime_cmd) ps -a --filter "name=^${container_name}$" --format "{{.Names}}"  | grep -q "^${container_name}$"; then
         # Check if it's running
-        if docker ps --filter "name=^${container_name}$" --format "{{.Names}}"  | grep -q "^${container_name}$"; then
+        if $(runtime_cmd) ps --filter "name=^${container_name}$" --format "{{.Names}}"  | grep -q "^${container_name}$"; then
             echo "running"
         else
             echo "stopped"
@@ -562,26 +609,42 @@ check_container_exists() {
 }
 
 run_docker_build() {
-    info "Running docker build..."
-    export DOCKER_BUILDKIT=1
-    
+    info "Running container image build..."
+
     # Check if we need to force rebuild due to template changes
     local no_cache_flag=""
     if [[ "${CLAUDEBOX_FORCE_NO_CACHE:-false}" == "true" ]]; then
         no_cache_flag="--no-cache"
         info "Forcing full rebuild (templates changed)"
     fi
-    
-    docker build \
-        $no_cache_flag \
-        --progress=${BUILDKIT_PROGRESS:-auto} \
-        --build-arg BUILDKIT_INLINE_CACHE=1 \
-        --build-arg USER_ID="$USER_ID" \
-        --build-arg GROUP_ID="$GROUP_ID" \
+
+    local build_cmd_args=()
+    if [[ -n "$no_cache_flag" ]]; then
+        build_cmd_args+=("$no_cache_flag")
+    fi
+
+    if [[ "$RUNTIME_HAS_BUILDKIT" == "true" ]]; then
+        export DOCKER_BUILDKIT=1
+        build_cmd_args+=(--progress="${BUILDKIT_PROGRESS:-auto}")
+        build_cmd_args+=(--build-arg "BUILDKIT_INLINE_CACHE=1")
+    fi
+
+    # For rootless Podman, use fixed UID/GID 1000
+    local build_uid="$USER_ID"
+    local build_gid="$GROUP_ID"
+    if [[ "$CONTAINER_RUNTIME_MODE" == "podman-rootless" ]]; then
+        build_uid=1000
+        build_gid=1000
+    fi
+
+    $(runtime_cmd) build \
+        ${build_cmd_args[@]+"${build_cmd_args[@]}"} \
+        --build-arg USER_ID="$build_uid" \
+        --build-arg GROUP_ID="$build_gid" \
         --build-arg USERNAME="$DOCKER_USER" \
         --build-arg DELTA_VERSION="$DELTA_VERSION" \
         --build-arg REBUILD_TIMESTAMP="${CLAUDEBOX_REBUILD_TIMESTAMP:-}" \
-        -f "$1" -t "$IMAGE_NAME" "$2" || error "Docker build failed"
+        -f "$1" -t "$IMAGE_NAME" "$2" || error "Container image build failed"
 }
 
 export -f check_docker install_docker configure_docker_nonroot docker_exec_root docker_exec_user run_claudebox_container check_container_exists run_docker_build
