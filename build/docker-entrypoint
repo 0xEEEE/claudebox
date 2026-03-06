@@ -173,8 +173,15 @@ if command -v inotifywait >/dev/null 2>&1 && [ "${DISABLE_FIREWALL:-false}" != "
                 fi
             }
 
-            inotifywait -m -q -e modify -e close_write "$ALLOWLIST_FILE" 2>/dev/null |
-            while read path event file; do
+            # Watch the DIRECTORY (not the file) to handle editor file-replace behavior
+            # Editors like vim/nano/VSCode write a temp file then rename, which breaks
+            # file-level inotify watches (original inode is deleted)
+            ALLOWLIST_DIR="$(dirname "$ALLOWLIST_FILE")"
+            ALLOWLIST_NAME="$(basename "$ALLOWLIST_FILE")"
+            inotifywait -m -q -e modify -e close_write -e moved_to -e create "$ALLOWLIST_DIR" 2>/dev/null |
+            while read dir event file; do
+                # Only react to changes on the allowlist file
+                [ "$file" = "$ALLOWLIST_NAME" ] || continue
                 # Parse current allowlist into new domain list
                 NEW_DOMAINS=$(grep -v '^#' "$ALLOWLIST_FILE" 2>/dev/null | grep -v '^$' | sed 's/^\*\.//' | xargs -n1 2>/dev/null | sort -u)
 
