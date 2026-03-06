@@ -22,8 +22,16 @@ log_error() {
 # Helper: detect IPv6 address (contains colon)
 is_ipv6() { case "$1" in *:*) return 0 ;; *) return 1 ;; esac; }
 
-# Helper: apply rule to both iptables and ip6tables
-fw_both() { iptables "$@" 2>/dev/null || true; ip6tables "$@" 2>/dev/null || true; }
+# IPv6 firewall support flag (detected below)
+HAS_IP6TABLES=false
+
+# Helper: apply rule to both iptables and ip6tables (only if ip6tables is functional)
+fw_both() {
+    iptables "$@" 2>/dev/null || true
+    if [ "$HAS_IP6TABLES" = "true" ]; then
+        ip6tables "$@" 2>/dev/null || true
+    fi
+}
 
 # State tracking
 FIREWALL_INITIALIZED=false
@@ -63,6 +71,26 @@ fi
 
 log "Initializing firewall rules..."
 
+# Detect ip6tables availability: try adding and removing a test rule
+if command -v ip6tables >/dev/null 2>&1; then
+    if ip6tables -A OUTPUT -j ACCEPT 2>/dev/null; then
+        ip6tables -D OUTPUT -j ACCEPT 2>/dev/null || true
+        HAS_IP6TABLES=true
+        log "ip6tables: functional"
+    else
+        log "ip6tables: not functional (kernel module unavailable?)"
+    fi
+else
+    log "ip6tables: not installed"
+fi
+
+# If ip6tables is not available, disable IPv6 via sysctl to prevent leaks
+if [ "$HAS_IP6TABLES" != "true" ]; then
+    log "Disabling IPv6 via sysctl (no ip6tables for firewall control)"
+    sysctl -w net.ipv6.conf.all.disable_ipv6=1 2>/dev/null || true
+    sysctl -w net.ipv6.conf.default.disable_ipv6=1 2>/dev/null || true
+fi
+
 # Flush existing rules (ignore errors if no rules exist)
 fw_both -F OUTPUT
 fw_both -F INPUT
@@ -77,8 +105,10 @@ fw_both -A OUTPUT -o lo -j ACCEPT
 fw_both -A INPUT -i lo -j ACCEPT
 iptables -A OUTPUT -s 127.0.0.0/8 -d 127.0.0.0/8 -j ACCEPT 2>/dev/null || true
 iptables -A INPUT -s 127.0.0.0/8 -d 127.0.0.0/8 -j ACCEPT 2>/dev/null || true
-ip6tables -A OUTPUT -s ::1/128 -d ::1/128 -j ACCEPT 2>/dev/null || true
-ip6tables -A INPUT -s ::1/128 -d ::1/128 -j ACCEPT 2>/dev/null || true
+if [ "$HAS_IP6TABLES" = "true" ]; then
+    ip6tables -A OUTPUT -s ::1/128 -d ::1/128 -j ACCEPT 2>/dev/null || true
+    ip6tables -A INPUT -s ::1/128 -d ::1/128 -j ACCEPT 2>/dev/null || true
+fi
 
 # Allow established connections
 fw_both -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
@@ -143,17 +173,22 @@ if [ "$IPSET_FUNCTIONAL" = "true" ]; then
     ipset destroy allowed-domains-v6 2>/dev/null || true
     ipset destroy allowed-ips-v6 2>/dev/null || true
 
-    # Create IPv4 and IPv6 sets
+    # Create IPv4 sets
     if ! ipset create allowed-domains hash:net 2>/dev/null || \
-       ! ipset create allowed-ips hash:net 2>/dev/null || \
-       ! ipset create allowed-domains-v6 hash:net family inet6 2>/dev/null || \
-       ! ipset create allowed-ips-v6 hash:net family inet6 2>/dev/null; then
-        log "Failed to create ipsets, falling back to direct rules"
+       ! ipset create allowed-ips hash:net 2>/dev/null; then
+        log "Failed to create IPv4 ipsets, falling back to direct rules"
         ipset destroy allowed-domains 2>/dev/null || true
         ipset destroy allowed-ips 2>/dev/null || true
-        ipset destroy allowed-domains-v6 2>/dev/null || true
-        ipset destroy allowed-ips-v6 2>/dev/null || true
         IPSET_FUNCTIONAL=false
+    fi
+    # Create IPv6 sets only if ip6tables is functional
+    if [ "$IPSET_FUNCTIONAL" = "true" ] && [ "$HAS_IP6TABLES" = "true" ]; then
+        if ! ipset create allowed-domains-v6 hash:net family inet6 2>/dev/null || \
+           ! ipset create allowed-ips-v6 hash:net family inet6 2>/dev/null; then
+            log "Failed to create IPv6 ipsets (IPv4 ipsets still active)"
+            ipset destroy allowed-domains-v6 2>/dev/null || true
+            ipset destroy allowed-ips-v6 2>/dev/null || true
+        fi
     fi
 fi
 
@@ -161,7 +196,9 @@ fi
 ipset_add_domain() {
     local ip="$1"
     if is_ipv6 "$ip"; then
-        ipset add allowed-domains-v6 "$ip" 2>/dev/null || true
+        if [ "$HAS_IP6TABLES" = "true" ]; then
+            ipset add allowed-domains-v6 "$ip" 2>/dev/null || true
+        fi
     else
         ipset add allowed-domains "$ip" 2>/dev/null || true
     fi
@@ -170,7 +207,9 @@ ipset_add_domain() {
 ipset_add_ip() {
     local ip="$1"
     if is_ipv6 "$ip"; then
-        ipset add allowed-ips-v6 "$ip" 2>/dev/null || true
+        if [ "$HAS_IP6TABLES" = "true" ]; then
+            ipset add allowed-ips-v6 "$ip" 2>/dev/null || true
+        fi
     else
         ipset add allowed-ips "$ip" 2>/dev/null || true
     fi
@@ -180,7 +219,9 @@ ipset_add_ip() {
 fw_allow_ip() {
     local ip="$1"
     if is_ipv6 "$ip"; then
-        ip6tables -A OUTPUT -d "$ip" -j ACCEPT 2>/dev/null
+        if [ "$HAS_IP6TABLES" = "true" ]; then
+            ip6tables -A OUTPUT -d "$ip" -j ACCEPT 2>/dev/null
+        fi
     else
         iptables -A OUTPUT -d "$ip" -j ACCEPT 2>/dev/null
     fi
@@ -204,10 +245,12 @@ if [ "$IPSET_FUNCTIONAL" = "true" ]; then
     # Apply iptables rules with ipset matching (IPv4)
     iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT 2>/dev/null || true
     iptables -A OUTPUT -m set --match-set allowed-ips dst -j ACCEPT 2>/dev/null || true
-    # Apply ip6tables rules with ipset matching (IPv6)
-    ip6tables -A OUTPUT -m set --match-set allowed-domains-v6 dst -j ACCEPT 2>/dev/null || true
-    ip6tables -A OUTPUT -m set --match-set allowed-ips-v6 dst -j ACCEPT 2>/dev/null || true
-    log "ipset rules applied (IPv4 + IPv6)"
+    # Apply ip6tables rules with ipset matching (IPv6) — only if functional
+    if [ "$HAS_IP6TABLES" = "true" ]; then
+        ip6tables -A OUTPUT -m set --match-set allowed-domains-v6 dst -j ACCEPT 2>/dev/null || true
+        ip6tables -A OUTPUT -m set --match-set allowed-ips-v6 dst -j ACCEPT 2>/dev/null || true
+    fi
+    log "ipset rules applied (IPv4$([ "$HAS_IP6TABLES" = "true" ] && printf ' + IPv6'))"
 fi
 
 # Fallback to direct iptables/ip6tables rules if ipset is not functional
@@ -241,9 +284,15 @@ fi
 # Set default-deny policy (this is the critical security step)
 iptables -P OUTPUT DROP
 iptables -P INPUT DROP
-ip6tables -P OUTPUT DROP
-ip6tables -P INPUT DROP
+if [ "$HAS_IP6TABLES" = "true" ]; then
+    ip6tables -P OUTPUT DROP
+    ip6tables -P INPUT DROP
+fi
 
 # Mark initialization as complete
 FIREWALL_INITIALIZED=true
-log "Firewall initialized successfully. Default policy: DROP (IPv4 + IPv6)"
+if [ "$HAS_IP6TABLES" = "true" ]; then
+    log "Firewall initialized successfully. Default policy: DROP (IPv4 + IPv6)"
+else
+    log "Firewall initialized successfully. Default policy: DROP (IPv4 only, IPv6 disabled via sysctl)"
+fi

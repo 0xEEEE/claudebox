@@ -80,6 +80,12 @@ if command -v inotifywait >/dev/null 2>&1 && [ "${DISABLE_FIREWALL:-false}" != "
             # Helper: detect IPv6 address (contains colon)
             is_ipv6() { case "$1" in *:*) return 0 ;; *) return 1 ;; esac; }
 
+            # Detect if IPv6 is enabled (not disabled via sysctl)
+            HAS_IPV6=false
+            if [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null)" != "1" ]; then
+                HAS_IPV6=true
+            fi
+
             # Snapshot currently applied domains
             grep -v '^#' "$ALLOWLIST_FILE" 2>/dev/null | grep -v '^$' | sed 's/^\*\.//' | xargs -n1 2>/dev/null | sort -u > "$APPLIED_FILE" 2>/dev/null || true
 
@@ -89,7 +95,7 @@ if command -v inotifywait >/dev/null 2>&1 && [ "${DISABLE_FIREWALL:-false}" != "
             if ipset list allowed-domains >/dev/null 2>&1; then
                 USE_IPSET=true
             fi
-            if ipset list allowed-domains-v6 >/dev/null 2>&1; then
+            if [ "$HAS_IPV6" = "true" ] && ipset list allowed-domains-v6 >/dev/null 2>&1; then
                 USE_IPSET6=true
             fi
 
@@ -97,6 +103,7 @@ if command -v inotifywait >/dev/null 2>&1 && [ "${DISABLE_FIREWALL:-false}" != "
             fw_add_domain_ip() {
                 local ip="$1"
                 if is_ipv6 "$ip"; then
+                    if [ "$HAS_IPV6" != "true" ]; then return 0; fi
                     if [ "$USE_IPSET6" = "true" ]; then
                         ipset add allowed-domains-v6 "$ip" 2>/dev/null || true
                     else
@@ -114,6 +121,7 @@ if command -v inotifywait >/dev/null 2>&1 && [ "${DISABLE_FIREWALL:-false}" != "
             fw_add_direct_ip() {
                 local ip="$1"
                 if is_ipv6 "$ip"; then
+                    if [ "$HAS_IPV6" != "true" ]; then return 0; fi
                     if [ "$USE_IPSET6" = "true" ]; then
                         ipset add allowed-ips-v6 "$ip" 2>/dev/null || true
                     else
@@ -132,6 +140,7 @@ if command -v inotifywait >/dev/null 2>&1 && [ "${DISABLE_FIREWALL:-false}" != "
             fw_del_domain_ip() {
                 local ip="$1"
                 if is_ipv6 "$ip"; then
+                    if [ "$HAS_IPV6" != "true" ]; then return 0; fi
                     if [ "$USE_IPSET6" = "true" ]; then
                         ipset del allowed-domains-v6 "$ip" 2>/dev/null || true
                     else
@@ -149,6 +158,7 @@ if command -v inotifywait >/dev/null 2>&1 && [ "${DISABLE_FIREWALL:-false}" != "
             fw_del_direct_ip() {
                 local ip="$1"
                 if is_ipv6 "$ip"; then
+                    if [ "$HAS_IPV6" != "true" ]; then return 0; fi
                     if [ "$USE_IPSET6" = "true" ]; then
                         ipset del allowed-ips-v6 "$ip" 2>/dev/null || true
                     else
