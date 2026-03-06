@@ -3,7 +3,7 @@
 # This script runs once at container startup and then deletes itself.
 #
 # Security features:
-# - Default-deny egress policy
+# - Default-deny egress policy (IPv4 and IPv6)
 # - Allowlist-based domain filtering
 # - DNS resolution for domain names
 # - CIDR notation support for IP ranges
@@ -18,6 +18,12 @@ log() {
 log_error() {
     echo "[init-firewall] ERROR: $1" >&2
 }
+
+# Helper: detect IPv6 address (contains colon)
+is_ipv6() { case "$1" in *:*) return 0 ;; *) return 1 ;; esac; }
+
+# Helper: apply rule to both iptables and ip6tables
+fw_both() { iptables "$@" 2>/dev/null || true; ip6tables "$@" 2>/dev/null || true; }
 
 # State tracking
 FIREWALL_INITIALIZED=false
@@ -58,23 +64,25 @@ fi
 log "Initializing firewall rules..."
 
 # Flush existing rules (ignore errors if no rules exist)
-iptables -F OUTPUT 2>/dev/null || log "No OUTPUT rules to flush"
-iptables -F INPUT 2>/dev/null || log "No INPUT rules to flush"
+fw_both -F OUTPUT
+fw_both -F INPUT
 
 # Allow DNS queries (required for domain resolution)
-iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
-iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
-iptables -A INPUT -p udp --sport 53 -j ACCEPT
+fw_both -A OUTPUT -p udp --dport 53 -j ACCEPT
+fw_both -A OUTPUT -p tcp --dport 53 -j ACCEPT
+fw_both -A INPUT -p udp --sport 53 -j ACCEPT
 
 # Allow loopback interface
-iptables -A OUTPUT -o lo -j ACCEPT
-iptables -A INPUT -i lo -j ACCEPT
-iptables -A OUTPUT -s 127.0.0.0/8 -d 127.0.0.0/8 -j ACCEPT
-iptables -A INPUT -s 127.0.0.0/8 -d 127.0.0.0/8 -j ACCEPT
+fw_both -A OUTPUT -o lo -j ACCEPT
+fw_both -A INPUT -i lo -j ACCEPT
+iptables -A OUTPUT -s 127.0.0.0/8 -d 127.0.0.0/8 -j ACCEPT 2>/dev/null || true
+iptables -A INPUT -s 127.0.0.0/8 -d 127.0.0.0/8 -j ACCEPT 2>/dev/null || true
+ip6tables -A OUTPUT -s ::1/128 -d ::1/128 -j ACCEPT 2>/dev/null || true
+ip6tables -A INPUT -s ::1/128 -d ::1/128 -j ACCEPT 2>/dev/null || true
 
 # Allow established connections
-iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+fw_both -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+fw_both -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
 # Default allowed domains (Anthropic services)
 DEFAULT_DOMAINS="api.anthropic.com console.anthropic.com statsig.anthropic.com sentry.io storage.googleapis.com"
@@ -84,6 +92,10 @@ ALLOWLIST_FILE="/home/DOCKERUSER/.claudebox/allowlist"
 
 # Domain validation regex: alphanumeric, hyphens, dots, and optional CIDR notation
 VALID_DOMAIN_REGEX='^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?(/[0-9]+)?$'
+
+# IP detection patterns
+IPV4_REGEX='^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$'
+IPV6_REGEX='^[0-9a-fA-F:]+(/[0-9]+)?$'
 
 # Load custom allowlist if exists
 if [ -f "$ALLOWLIST_FILE" ]; then
@@ -125,48 +137,89 @@ fi
 
 if [ "$IPSET_FUNCTIONAL" = "true" ]; then
     log "Using ipset for domain filtering"
+    # Destroy existing sets
     ipset destroy allowed-domains 2>/dev/null || true
     ipset destroy allowed-ips 2>/dev/null || true
+    ipset destroy allowed-domains-v6 2>/dev/null || true
+    ipset destroy allowed-ips-v6 2>/dev/null || true
 
-    # Create sets with error handling
+    # Create IPv4 and IPv6 sets
     if ! ipset create allowed-domains hash:net 2>/dev/null || \
-       ! ipset create allowed-ips hash:net 2>/dev/null; then
+       ! ipset create allowed-ips hash:net 2>/dev/null || \
+       ! ipset create allowed-domains-v6 hash:net family inet6 2>/dev/null || \
+       ! ipset create allowed-ips-v6 hash:net family inet6 2>/dev/null; then
         log "Failed to create ipsets, falling back to direct rules"
         ipset destroy allowed-domains 2>/dev/null || true
         ipset destroy allowed-ips 2>/dev/null || true
+        ipset destroy allowed-domains-v6 2>/dev/null || true
+        ipset destroy allowed-ips-v6 2>/dev/null || true
         IPSET_FUNCTIONAL=false
     fi
 fi
 
+# Helper: add IP to correct ipset based on address family
+ipset_add_domain() {
+    local ip="$1"
+    if is_ipv6 "$ip"; then
+        ipset add allowed-domains-v6 "$ip" 2>/dev/null || true
+    else
+        ipset add allowed-domains "$ip" 2>/dev/null || true
+    fi
+}
+
+ipset_add_ip() {
+    local ip="$1"
+    if is_ipv6 "$ip"; then
+        ipset add allowed-ips-v6 "$ip" 2>/dev/null || true
+    else
+        ipset add allowed-ips "$ip" 2>/dev/null || true
+    fi
+}
+
+# Helper: add direct iptables/ip6tables rule for an IP
+fw_allow_ip() {
+    local ip="$1"
+    if is_ipv6 "$ip"; then
+        ip6tables -A OUTPUT -d "$ip" -j ACCEPT 2>/dev/null
+    else
+        iptables -A OUTPUT -d "$ip" -j ACCEPT 2>/dev/null
+    fi
+}
+
 # Only proceed with ipset if still functional
 if [ "$IPSET_FUNCTIONAL" = "true" ]; then
     for domain in $ALLOWED_DOMAINS; do
-        if [[ "$domain" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$ ]]; then
-            ipset add allowed-ips "$domain" 2>/dev/null || true
+        if [[ "$domain" =~ $IPV4_REGEX ]]; then
+            ipset_add_ip "$domain"
+        elif [[ "$domain" =~ $IPV6_REGEX ]]; then
+            ipset_add_ip "$domain"
         else
             ips=$(getent hosts "$domain" 2>/dev/null | awk '{print $1}') || true
             for ip in $ips; do
-                ipset add allowed-domains "$ip" 2>/dev/null || true
+                ipset_add_domain "$ip"
             done
         fi
     done
 
-    # Apply iptables rules with ipset matching
+    # Apply iptables rules with ipset matching (IPv4)
     iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT 2>/dev/null || true
     iptables -A OUTPUT -m set --match-set allowed-ips dst -j ACCEPT 2>/dev/null || true
-    log "ipset rules applied"
+    # Apply ip6tables rules with ipset matching (IPv6)
+    ip6tables -A OUTPUT -m set --match-set allowed-domains-v6 dst -j ACCEPT 2>/dev/null || true
+    ip6tables -A OUTPUT -m set --match-set allowed-ips-v6 dst -j ACCEPT 2>/dev/null || true
+    log "ipset rules applied (IPv4 + IPv6)"
 fi
 
-# Fallback to direct iptables rules if ipset is not functional
+# Fallback to direct iptables/ip6tables rules if ipset is not functional
 if [ "$IPSET_FUNCTIONAL" != "true" ]; then
-    log "Using iptables rules directly (ipset not available)"
+    log "Using iptables/ip6tables rules directly (ipset not available)"
     IPTABLES_RULES_ADDED=0
     for domain in $ALLOWED_DOMAINS; do
-        if [[ "$domain" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$ ]]; then
-            if iptables -A OUTPUT -d "$domain" -j ACCEPT 2>/dev/null; then
+        if [[ "$domain" =~ $IPV4_REGEX ]] || [[ "$domain" =~ $IPV6_REGEX ]]; then
+            if fw_allow_ip "$domain"; then
                 IPTABLES_RULES_ADDED=$((IPTABLES_RULES_ADDED + 1))
             else
-                log "Warning: Failed to add iptables rule for: $domain"
+                log "Warning: Failed to add rule for: $domain"
             fi
         else
             ips=$(getent hosts "$domain" 2>/dev/null | awk '{print $1}') || true
@@ -174,21 +227,23 @@ if [ "$IPSET_FUNCTIONAL" != "true" ]; then
                 log "Warning: Could not resolve domain: $domain"
             fi
             for ip in $ips; do
-                if iptables -A OUTPUT -d "$ip" -j ACCEPT 2>/dev/null; then
+                if fw_allow_ip "$ip"; then
                     IPTABLES_RULES_ADDED=$((IPTABLES_RULES_ADDED + 1))
                 else
-                    log "Warning: Failed to add iptables rule for: $ip ($domain)"
+                    log "Warning: Failed to add rule for: $ip ($domain)"
                 fi
             done
         fi
     done
-    log "Added $IPTABLES_RULES_ADDED iptables rules"
+    log "Added $IPTABLES_RULES_ADDED iptables/ip6tables rules"
 fi
 
 # Set default-deny policy (this is the critical security step)
 iptables -P OUTPUT DROP
 iptables -P INPUT DROP
+ip6tables -P OUTPUT DROP
+ip6tables -P INPUT DROP
 
 # Mark initialization as complete
 FIREWALL_INITIALIZED=true
-log "Firewall initialized successfully. Default policy: DROP"
+log "Firewall initialized successfully. Default policy: DROP (IPv4 + IPv6)"
