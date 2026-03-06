@@ -8,10 +8,10 @@ _cmd_clean() {
     case "${1:-}" in
         docker)
             # Check if any ClaudeBox resources exist
-            local containers=$(docker ps -a --filter "label=claudebox.project" -q 2>/dev/null)
-            local cb_containers=$(docker ps -a --format "{{.Names}}" 2>/dev/null | grep "^claudebox-" || true)
-            local images=$(docker images --filter "reference=claudebox*" -q 2>/dev/null)
-            local volumes=$(docker volume ls -q --filter "name=claudebox" 2>/dev/null)
+            local containers=$($(runtime_cmd) ps -a --filter "label=claudebox.project" -q 2>/dev/null)
+            local cb_containers=$($(runtime_cmd) ps -a --format "{{.Names}}" 2>/dev/null | grep "^claudebox-" || true)
+            local images=$($(runtime_cmd) images --filter "reference=claudebox*" -q 2>/dev/null)
+            local volumes=$($(runtime_cmd) volume ls -q --filter "name=claudebox" 2>/dev/null)
             
             if [[ -z "$containers" ]] && [[ -z "$cb_containers" ]] && [[ -z "$images" ]] && [[ -z "$volumes" ]]; then
                 info "No ClaudeBox Docker resources found"
@@ -21,27 +21,32 @@ _cmd_clean() {
             
             # Remove all claudebox containers
             if [[ -n "$containers" ]]; then
-                docker ps -a --filter "label=claudebox.project" -q | xargs -r docker rm -f 2>/dev/null || true
+                $(runtime_cmd) ps -a --filter "label=claudebox.project" -q | xargs -r $(runtime_cmd) rm -f 2>/dev/null || true
             fi
             if [[ -n "$cb_containers" ]]; then
-                docker ps -a --format "{{.Names}}" | grep "^claudebox-" | xargs -r docker rm -f 2>/dev/null || true
+                $(runtime_cmd) ps -a --format "{{.Names}}" | grep "^claudebox-" | xargs -r $(runtime_cmd) rm -f 2>/dev/null || true
             fi
 
             # Remove ALL claudebox images (including base)
             if [[ -n "$images" ]]; then
-                docker images --filter "reference=claudebox-*" -q | xargs -r docker rmi -f 2>/dev/null || true
-                docker images --filter "reference=claudebox" -q | xargs -r docker rmi -f 2>/dev/null || true
+                $(runtime_cmd) images --filter "reference=claudebox-*" -q | xargs -r $(runtime_cmd) rmi -f 2>/dev/null || true
+                $(runtime_cmd) images --filter "reference=claudebox" -q | xargs -r $(runtime_cmd) rmi -f 2>/dev/null || true
             fi
 
             # Remove dangling images
-            docker images -f "dangling=true" -q | xargs -r docker rmi -f 2>/dev/null || true
+            $(runtime_cmd) images -f "dangling=true" -q | xargs -r $(runtime_cmd) rmi -f 2>/dev/null || true
 
             # Prune build cache
-            docker builder prune -af 2>/dev/null || true
+            # Podman doesn't have `builder prune`, use `system prune` instead
+            if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+                $(runtime_cmd) system prune -af 2>/dev/null || true
+            else
+                $(runtime_cmd) builder prune -af 2>/dev/null || true
+            fi
 
             # Remove volumes
             if [[ -n "$volumes" ]]; then
-                docker volume ls -q --filter "name=claudebox" | xargs -r docker volume rm 2>/dev/null || true
+                $(runtime_cmd) volume ls -q --filter "name=claudebox" | xargs -r $(runtime_cmd) volume rm 2>/dev/null || true
             fi
 
             success "ClaudeBox Docker resources removed"
@@ -189,15 +194,15 @@ _clean_project() {
     done
     
     # Remove containers for this project
-    local containers=$(docker ps -a --format "{{.Names}}" 2>/dev/null | grep "^claudebox-${project_name}-" || true)
+    local containers=$($(runtime_cmd) ps -a --format "{{.Names}}" 2>/dev/null | grep "^claudebox-${project_name}-" || true)
     if [[ -n "$containers" ]]; then
-        echo "$containers" | xargs -r docker rm -f 2>/dev/null || true
+        echo "$containers" | xargs -r $(runtime_cmd) rm -f 2>/dev/null || true
     fi
     
     # Remove project image (but not core)
     local image_name="claudebox-${project_name}"
-    if docker image inspect "$image_name" >/dev/null 2>&1; then
-        docker rmi -f "$image_name" 2>/dev/null || true
+    if $(runtime_cmd) image inspect "$image_name" >/dev/null 2>&1; then
+        $(runtime_cmd) rmi -f "$image_name" 2>/dev/null || true
     fi
     
     # Remove the entire project directory

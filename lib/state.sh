@@ -186,7 +186,7 @@ needs_docker_rebuild() {
     fi
     
     # If no image exists, need rebuild
-    if ! docker image inspect "$image_name" >/dev/null 2>&1; then
+    if ! $(runtime_cmd) image inspect "$image_name" >/dev/null 2>&1; then
         if [[ "$VERBOSE" == "true" ]]; then
             echo "[DEBUG] Image doesn't exist, rebuild needed" >&2
         fi

@@ -169,26 +169,40 @@ _cmd_info() {
     echo -e "   ${CYAN}Hint:${NC} Run 'claudebox profile' for profile help "
     echo
 
-    cecho "🐳 Docker Status" "$WHITE"
-    if [[ -n "${IMAGE_NAME:-}" ]] && docker image inspect "$IMAGE_NAME" &>/dev/null; then
-        local image_info=$(docker images --filter "reference=$IMAGE_NAME" --format "{{.Size}}")
+    # Container Runtime
+    cecho "🔧 Container Runtime" "$WHITE"
+    echo "   Runtime:    $CONTAINER_RUNTIME"
+    echo "   Mode:       $CONTAINER_RUNTIME_MODE"
+    echo "   BuildKit:   $RUNTIME_HAS_BUILDKIT"
+    echo "   Firewall:   $RUNTIME_HAS_FIREWALL"
+    echo
+
+    cecho "🐳 Container Status" "$WHITE"
+    if [[ -n "${IMAGE_NAME:-}" ]] && $(runtime_cmd) image inspect "$IMAGE_NAME" &>/dev/null; then
+        local image_info=$($(runtime_cmd) images --filter "reference=$IMAGE_NAME" --format "{{.Size}}")
         echo -e "   Image:      ${GREEN}Ready${NC} ($IMAGE_NAME - $image_info)"
 
-        local image_created=$(docker inspect "$IMAGE_NAME" --format '{{.Created}}' | cut -d'T' -f1)
-        local layer_count=$(docker history "$IMAGE_NAME" --no-trunc --format "{{.CreatedBy}}" | wc -l)
+        local image_created=$($(runtime_cmd) inspect "$IMAGE_NAME" --format '{{.Created}}' | cut -d'T' -f1)
+        local layer_count=$($(runtime_cmd) history "$IMAGE_NAME" --no-trunc --format "{{.CreatedBy}}" | wc -l)
         echo "   Created:    $image_created"
         echo "   Layers:     $layer_count"
     else
         echo -e "   Image:      ${YELLOW}Not built${NC}"
     fi
 
-    local running_containers=$(docker ps --filter "ancestor=$IMAGE_NAME" -q 2>/dev/null)
+    local running_containers=$($(runtime_cmd) ps --filter "ancestor=$IMAGE_NAME" -q 2>/dev/null)
     if [[ -n "$running_containers" ]]; then
         local container_count=$(echo "$running_containers" | wc -l)
         echo -e "   Containers: ${GREEN}$container_count running${NC}"
 
+        # Podman uses {{.ID}} instead of {{.Container}} for stats
+        local stats_id_field="{{.Container}}"
+        if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+            stats_id_field="{{.ID}}"
+        fi
+
         for container_id in $running_containers; do
-            local container_stats="$(docker stats --no-stream --format "{{.Container}}: {{.CPUPerc}} CPU, {{.MemUsage}}" "$container_id" 2>/dev/null || echo "")"
+            local container_stats="$($(runtime_cmd) stats --no-stream --format "${stats_id_field}: {{.CPUPerc}} CPU, {{.MemUsage}}" "$container_id" 2>/dev/null || echo "")"
             if [[ -n "$container_stats" ]]; then
                 echo "               - $container_stats"
             fi
@@ -203,7 +217,7 @@ _cmd_info() {
     local total_projects=$(ls -1d "$HOME/.claudebox/projects"/*/ 2>/dev/null | wc -l)
     echo "   Projects:   $total_projects total"
 
-    local total_size=$(docker images --filter "reference=claudebox-*" --format "{{.Size}}" | awk '{
+    local total_size=$($(runtime_cmd) images --filter "reference=claudebox-*" --format "{{.Size}}" | awk '{
         size=$1; unit=$2;
         if (unit == "GB") size = size * 1024;
         else if (unit == "KB") size = size / 1024;
@@ -212,10 +226,10 @@ _cmd_info() {
         if (total > 1024) printf "%.1fGB", total/1024;
         else printf "%.1fMB", total
     }')
-    local image_count=$(docker images --filter "reference=claudebox-*" -q | wc -l)
+    local image_count=$($(runtime_cmd) images --filter "reference=claudebox-*" -q | wc -l)
     echo "   Images:     $image_count ClaudeBox images using $total_size"
 
-    local docker_stats=$(docker system df --format "table {{.Type}}\t{{.Total}}\t{{.Active}}\t{{.Size}}\t{{.Reclaimable}}" 2>/dev/null | tail -n +2)
+    local docker_stats=$($(runtime_cmd) system df --format "table {{.Type}}\t{{.Total}}\t{{.Active}}\t{{.Size}}\t{{.Reclaimable}}" 2>/dev/null | tail -n +2)
     if [[ -n "$docker_stats" ]]; then
         echo "   System:"
         while IFS=$'\t' read -r type total active size reclaim; do

@@ -128,7 +128,7 @@ show_help() {
     local project_folder_name
     project_folder_name=$(get_project_folder_name "$PROJECT_DIR" 2>/dev/null || echo "NONE")
     
-    if [[ "$project_folder_name" != "NONE" ]] && [[ -n "${IMAGE_NAME:-}" ]] && docker image inspect "$IMAGE_NAME" &>/dev/null; then
+    if [[ "$project_folder_name" != "NONE" ]] && [[ -n "${IMAGE_NAME:-}" ]] && $(runtime_cmd) image inspect "$IMAGE_NAME" &>/dev/null; then
         # In project directory with Docker image - show brief ClaudeBox help and note about Claude commands
         echo
         logo_small
@@ -187,9 +187,9 @@ show_help() {
 
 # Show Claude help (runs Claude's help in container)
 show_claude_help() {
-    if [[ -n "${IMAGE_NAME:-}" ]] && docker image inspect "$IMAGE_NAME" &>/dev/null; then
+    if [[ -n "${IMAGE_NAME:-}" ]] && $(runtime_cmd) image inspect "$IMAGE_NAME" &>/dev/null; then
         # Get Claude's help and just change claude to claudebox in the header
-        local claude_help=$(docker run --rm "$IMAGE_NAME" claude --help 2>&1 | grep -v "iptables")
+        local claude_help=$($(runtime_cmd) run --rm "$IMAGE_NAME" claude --help 2>&1 | grep -v "iptables")
         
         # Just change claude to claudebox in the first line
         local processed_help=$(echo "$claude_help" | sed '1s/claude/claudebox/g')
@@ -206,9 +206,9 @@ show_claude_help() {
 
 # Show full combined help
 show_full_help() {
-    if [[ -n "${IMAGE_NAME:-}" ]] && docker image inspect "$IMAGE_NAME" &>/dev/null; then
+    if [[ -n "${IMAGE_NAME:-}" ]] && $(runtime_cmd) image inspect "$IMAGE_NAME" &>/dev/null; then
         # Get Claude's help and blend our additions
-        local claude_help=$(docker run --rm "$IMAGE_NAME" claude --help 2>&1 | grep -v "iptables")
+        local claude_help=$($(runtime_cmd) run --rm "$IMAGE_NAME" claude --help 2>&1 | grep -v "iptables")
         
         # Process and combine everything in memory
         local full_help=$(echo "$claude_help" | \

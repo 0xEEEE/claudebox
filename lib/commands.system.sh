@@ -51,11 +51,11 @@ _cmd_kill() {
         # Kill ALL claudebox containers
         info "Killing all ClaudeBox containers..."
         
-        local containers=$(docker ps --filter "name=^claudebox-" --format "{{.Names}}")
+        local containers=$($(runtime_cmd) ps --filter "name=^claudebox-" --format "{{.Names}}")
         if [[ -n "$containers" ]]; then
             while IFS= read -r container; do
                 if [[ -n "$container" ]]; then
-                    docker stop "$container" >/dev/null 2>&1 && ((killed_containers++)) || true
+                    $(runtime_cmd) stop "$container" >/dev/null 2>&1 && ((killed_containers++)) || true
                 fi
             done <<< "$containers"
             success "Stopped $killed_containers container(s)"
@@ -68,15 +68,15 @@ _cmd_kill() {
         
         # Check if it's a hash (8 hex chars)
         if [[ "$target" =~ ^[a-f0-9]{8}$ ]]; then
-            matching_container=$(docker ps --filter "name=claudebox-.*-$target$" --format "{{.Names}}" | head -1)
+            matching_container=$($(runtime_cmd) ps --filter "name=claudebox-.*-$target$" --format "{{.Names}}" | head -1)
         else
             # Try partial name match
-            matching_container=$(docker ps --filter "name=claudebox-.*$target" --format "{{.Names}}" | head -1)
+            matching_container=$($(runtime_cmd) ps --filter "name=claudebox-.*$target" --format "{{.Names}}" | head -1)
         fi
         
         if [[ -n "$matching_container" ]]; then
             info "Killing container: $matching_container"
-            if docker stop "$matching_container" >/dev/null 2>&1; then
+            if $(runtime_cmd) stop "$matching_container" >/dev/null 2>&1; then
                 success "Killed container: $matching_container"
             else
                 error "Failed to kill container: $matching_container"
@@ -86,7 +86,7 @@ _cmd_kill() {
         fi
     else
         # No argument - show active containers
-        local containers=$(docker ps --filter "name=^claudebox-" --format "{{.Names}}")
+        local containers=$($(runtime_cmd) ps --filter "name=^claudebox-" --format "{{.Names}}")
         
         if [[ -z "$containers" ]]; then
             info "No active ClaudeBox containers"
@@ -196,11 +196,11 @@ _cmd_tmux() {
             fi
             
             # Kill ALL claudebox containers
-            local containers=$(docker ps --filter "name=^claudebox-" --format "{{.Names}}")
+            local containers=$($(runtime_cmd) ps --filter "name=^claudebox-" --format "{{.Names}}")
             if [[ -n "$containers" ]]; then
                 while IFS= read -r container; do
                     if [[ -n "$container" ]]; then
-                        docker stop "$container" >/dev/null 2>&1 && ((killed_containers++)) || true
+                        $(runtime_cmd) stop "$container" >/dev/null 2>&1 && ((killed_containers++)) || true
                     fi
                 done <<< "$containers"
             fi
@@ -220,7 +220,7 @@ _cmd_tmux() {
             # No argument - show the menu (moved this up to catch empty args)
             # Show menu of active sessions
             local sessions=$(tmux list-sessions -F "#{session_name}" 2>/dev/null | grep "^claudebox-" || true)
-            local containers=$(docker ps --filter "name=^claudebox-" --format "{{.Names}}")
+            local containers=$($(runtime_cmd) ps --filter "name=^claudebox-" --format "{{.Names}}")
             
             if [[ -z "$sessions" ]] && [[ -z "$containers" ]]; then
                 info "No active ClaudeBox sessions or containers"
@@ -281,11 +281,11 @@ _cmd_tmux() {
             # Check if this looks like a container hash (8 hex chars)
             if [[ "$session_arg" =~ ^[a-f0-9]{8}$ ]]; then
                 # This is a container hash - kill just that container (Lost Boys child rule)
-                local matching_container=$(docker ps --filter "name=claudebox-.*-$session_arg$" --format "{{.Names}}" | head -1)
+                local matching_container=$($(runtime_cmd) ps --filter "name=claudebox-.*-$session_arg$" --format "{{.Names}}" | head -1)
                 
                 if [[ -n "$matching_container" ]]; then
                     info "Killing container: $matching_container"
-                    if docker stop "$matching_container" >/dev/null 2>&1; then
+                    if $(runtime_cmd) stop "$matching_container" >/dev/null 2>&1; then
                         ((killed_containers++)) || true
                         success "Killed container: $matching_container"
                         
@@ -329,12 +329,12 @@ _cmd_tmux() {
                 local session_name="$matching_sessions"
                 
                 # Kill ALL containers for this session (all children die with parent)
-                local containers=$(docker ps --filter "name=^$session_name-" --format "{{.Names}}")
+                local containers=$($(runtime_cmd) ps --filter "name=^$session_name-" --format "{{.Names}}")
                 if [[ -n "$containers" ]]; then
                     info "Stopping all containers for session: $session_name"
                     while IFS= read -r container; do
                         if [[ -n "$container" ]]; then
-                            docker stop "$container" >/dev/null 2>&1 && ((killed_containers++)) || true
+                            $(runtime_cmd) stop "$container" >/dev/null 2>&1 && ((killed_containers++)) || true
                         fi
                     done <<< "$containers"
                 fi
@@ -460,7 +460,7 @@ Current directory: $PWD"
                     local slot_dir="$PROJECT_PARENT_DIR/$slot_name"
                     
                     # Check if slot exists and is not currently running
-                    if [[ -d "$slot_dir" ]] && ! docker ps --format "{{.Names}}" | grep -q "^claudebox-.*-${slot_name}$"; then
+                    if [[ -d "$slot_dir" ]] && ! $(runtime_cmd) ps --format "{{.Names}}" | grep -q "^claudebox-.*-${slot_name}$"; then
                         available_slots+=("$idx")
                     fi
                 done
@@ -615,7 +615,7 @@ Current directory: $PWD"
                             local slot_name=$(generate_container_name "$PROJECT_DIR" "$slot")
                             
                             # Check if container is running - exactly like slots command
-                            if ! docker ps --format "{{.Names}}" | grep -q "^claudebox-.*-${slot_name}$"; then
+                            if ! $(runtime_cmd) ps --format "{{.Names}}" | grep -q "^claudebox-.*-${slot_name}$"; then
                                 all_ready=false
                                 break
                             fi
@@ -742,7 +742,7 @@ _cmd_special() {
     shift
     
     # Check if image exists first (for non-update commands)
-    if [[ "$cmd" != "update" ]] && ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+    if [[ "$cmd" != "update" ]] && ! $(runtime_cmd) image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
         error "No Docker image found for this project folder: $PROJECT_DIR\nRun 'claudebox' first to build the image, or cd to your project directory."
     fi
     
@@ -764,24 +764,24 @@ _cmd_special() {
     fillbar
     
     # Wait for container to finish
-    docker wait "$temp_container" >/dev/null
+    $(runtime_cmd) wait "$temp_container" >/dev/null
     
     fillbar stop
     
     # Show container output for commands that produce output
-    docker logs "$temp_container" 2>&1
+    $(runtime_cmd) logs "$temp_container" 2>&1
     
     # For update command, show version after update
     if [[ "$cmd" == "update" ]]; then
-        docker exec -u "$DOCKER_USER" "$temp_container" bash -c "
+        $(runtime_cmd) exec -u "$DOCKER_USER" "$temp_container" bash -c "
             export PATH=\"\$HOME/.local/bin:\$PATH\" && claude --version
         " 2>/dev/null || true
     fi
 
     # Commit changes back to image
-    docker commit "$temp_container" "$IMAGE_NAME" >/dev/null
-    docker stop "$temp_container" >/dev/null 2>&1 || true
-    docker rm "$temp_container" >/dev/null 2>&1 || true
+    $(runtime_cmd) commit "$temp_container" "$IMAGE_NAME" >/dev/null
+    $(runtime_cmd) stop "$temp_container" >/dev/null 2>&1 || true
+    $(runtime_cmd) rm "$temp_container" >/dev/null 2>&1 || true
     
     exit 0
 }

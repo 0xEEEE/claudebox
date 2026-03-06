@@ -147,7 +147,7 @@ _cmd_revoke() {
             
             if [ -d "$dir" ]; then
                 # Check if container is running
-                if docker ps --format "{{.Names}}" | grep -q "^claudebox-.*-${name}$"; then
+                if $(runtime_cmd) ps --format "{{.Names}}" | grep -q "^claudebox-.*-${name}$"; then
                     info "Slot $idx is in use, skipping"
                 else
                     if [[ "$VERBOSE" == "true" ]]; then
@@ -197,7 +197,7 @@ _cmd_revoke() {
             info "Slot $max doesn't exist. Counter adjusted to $new_max"
         else
             # Check if container is running
-            if docker ps --format "{{.Names}}" | grep -q "^claudebox-.*-${name}$"; then
+            if $(runtime_cmd) ps --format "{{.Names}}" | grep -q "^claudebox-.*-${name}$"; then
                 error "Cannot revoke slot $max - it is currently in use"
             fi
             
@@ -245,7 +245,7 @@ _cmd_kill() {
             local name=$(generate_container_name "$PROJECT_DIR" "$idx")
             local full_container="claudebox-$(basename "$parent")-${name}"
             
-            if docker ps --format "{{.Names}}" | grep -q "^${full_container}$"; then
+            if $(runtime_cmd) ps --format "{{.Names}}" | grep -q "^${full_container}$"; then
                 printf "  Slot %d: %s\n" "$idx" "$name"
                 found=true
             fi
@@ -271,7 +271,7 @@ _cmd_kill() {
     if [[ "$target" == "all" ]]; then
         local parent=$(get_parent_dir "$PROJECT_DIR")
         local project_name=$(basename "$parent")
-        local containers=$(docker ps --format "{{.Names}}" | grep "^claudebox-${project_name}-" || true)
+        local containers=$($(runtime_cmd) ps --format "{{.Names}}" | grep "^claudebox-${project_name}-" || true)
         
         if [[ -z "$containers" ]]; then
             info "No running containers to kill"
@@ -282,7 +282,7 @@ _cmd_kill() {
         warn "Killing all containers for this project..."
         echo "$containers" | while IFS= read -r container; do
             echo "  Killing: $container"
-            docker kill "$container" >/dev/null 2>&1 || true
+            $(runtime_cmd) kill "$container" >/dev/null 2>&1 || true
         done
         success "All containers killed"
         echo
@@ -294,9 +294,9 @@ _cmd_kill() {
     local project_name=$(basename "$parent")
     local full_container="claudebox-${project_name}-${target}"
     
-    if docker ps --format "{{.Names}}" | grep -q "^${full_container}$"; then
+    if $(runtime_cmd) ps --format "{{.Names}}" | grep -q "^${full_container}$"; then
         warn "Killing container: $full_container"
-        docker kill "$full_container" >/dev/null 2>&1 || error "Failed to kill container"
+        $(runtime_cmd) kill "$full_container" >/dev/null 2>&1 || error "Failed to kill container"
         success "Container killed"
     else
         error "Container not found: $target"

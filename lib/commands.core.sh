@@ -28,7 +28,7 @@ _cmd_help() {
             local project_folder_name
             project_folder_name=$(get_project_folder_name "$PROJECT_DIR" 2>/dev/null || echo "NONE")
             
-            if [[ "$project_folder_name" != "NONE" ]] && [[ -n "${IMAGE_NAME:-}" ]] && docker image inspect "$IMAGE_NAME" &>/dev/null; then
+            if [[ "$project_folder_name" != "NONE" ]] && [[ -n "${IMAGE_NAME:-}" ]] && $(runtime_cmd) image inspect "$IMAGE_NAME" &>/dev/null; then
                 # In project directory with image - show Claude help
                 show_claude_help
             else
@@ -65,7 +65,7 @@ _cmd_shell() {
     fi
     
     # Check if image exists
-    if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+    if ! $(runtime_cmd) image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
         error "No Docker image found for this project.\nRun 'claudebox' first to build the image."
     fi
     
@@ -107,8 +107,8 @@ _cmd_shell() {
         
         # Ensure cleanup runs on any exit (including Ctrl-C)
         cleanup_admin() {
-            docker commit "$temp_container" "$IMAGE_NAME" >/dev/null 2>&1
-            docker rm -f "$temp_container" >/dev/null 2>&1
+            $(runtime_cmd) commit "$temp_container" "$IMAGE_NAME" >/dev/null 2>&1
+            $(runtime_cmd) rm -f "$temp_container" >/dev/null 2>&1
         }
         trap cleanup_admin EXIT
         
@@ -123,8 +123,8 @@ _cmd_shell() {
         
         # Commit changes back to image
         fillbar
-        docker commit "$temp_container" "$IMAGE_NAME" >/dev/null
-        docker rm -f "$temp_container" >/dev/null 2>&1
+        $(runtime_cmd) commit "$temp_container" "$IMAGE_NAME" >/dev/null
+        $(runtime_cmd) rm -f "$temp_container" >/dev/null 2>&1
         fillbar stop
         success "Changes saved to image!"
     else
@@ -241,7 +241,7 @@ _cmd_update() {
     fi
     
     # Check if image exists first
-    if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+    if ! $(runtime_cmd) image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
         error "No Docker image found for this project folder: $PROJECT_DIR\nRun 'claudebox' first to build the image, or cd to your project directory."
     fi
     
