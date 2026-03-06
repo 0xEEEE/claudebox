@@ -195,7 +195,7 @@ if command -v inotifywait >/dev/null 2>&1 && [ "${DISABLE_FIREWALL:-false}" != "
                     elif echo "$domain" | grep -qE "$IPV6_REGEX"; then
                         fw_add_direct_ip "$domain"
                     else
-                        ips=$(getent hosts "$domain" 2>/dev/null | awk '{print $1}') || true
+                        ips=$(getent ahosts "$domain" 2>/dev/null | awk '{print $1}' | sort -u) || true
                         for ip in $ips; do
                             fw_add_domain_ip "$ip"
                         done
@@ -209,7 +209,7 @@ if command -v inotifywait >/dev/null 2>&1 && [ "${DISABLE_FIREWALL:-false}" != "
                     elif echo "$domain" | grep -qE "$IPV6_REGEX"; then
                         fw_del_direct_ip "$domain"
                     else
-                        ips=$(getent hosts "$domain" 2>/dev/null | awk '{print $1}') || true
+                        ips=$(getent ahosts "$domain" 2>/dev/null | awk '{print $1}' | sort -u) || true
                         for ip in $ips; do
                             fw_del_domain_ip "$ip"
                         done

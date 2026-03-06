@@ -235,7 +235,7 @@ if [ "$IPSET_FUNCTIONAL" = "true" ]; then
         elif [[ "$domain" =~ $IPV6_REGEX ]]; then
             ipset_add_ip "$domain"
         else
-            ips=$(getent hosts "$domain" 2>/dev/null | awk '{print $1}') || true
+            ips=$(getent ahosts "$domain" 2>/dev/null | awk '{print $1}' | sort -u) || true
             for ip in $ips; do
                 ipset_add_domain "$ip"
             done
@@ -265,7 +265,7 @@ if [ "$IPSET_FUNCTIONAL" != "true" ]; then
                 log "Warning: Failed to add rule for: $domain"
             fi
         else
-            ips=$(getent hosts "$domain" 2>/dev/null | awk '{print $1}') || true
+            ips=$(getent ahosts "$domain" 2>/dev/null | awk '{print $1}' | sort -u) || true
             if [ -z "$ips" ]; then
                 log "Warning: Could not resolve domain: $domain"
             fi
