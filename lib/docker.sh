@@ -269,6 +269,9 @@ run_claudebox_container() {
     
     # Mount .cache directory
     docker_args+=(-v "$PROJECT_SLOT_DIR/.cache":/home/$DOCKER_USER/.cache)
+
+    # Mount .local/bin for persistent Claude CLI updates
+    docker_args+=(-v "$PROJECT_SLOT_DIR/.local/bin":/home/$DOCKER_USER/.local/bin)
     
     # Mount SSH agent socket only - never mount host SSH directory or config
     # Security: Private keys and host config never enter container

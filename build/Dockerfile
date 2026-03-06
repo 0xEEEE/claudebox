@@ -88,6 +88,10 @@ ENV SHELL=/bin/zsh
 # Install Claude Code natively (recommended method, no Node.js required)
 # Uses vendored script verified via checksums-base.sha256
 RUN bash /tmp/claude-install.sh
+# Save Claude binary backup for persistent mount seeding
+USER root
+RUN mkdir -p /usr/local/lib/claudebox && cp /home/$USERNAME/.local/bin/claude /usr/local/lib/claudebox/claude-bin
+USER $USERNAME
 
 # Install bun runtime (required by skills and some profiles)
 COPY --chown=$USERNAME vendor/scripts/profiles/bun-install.sh /tmp/bun-install.sh

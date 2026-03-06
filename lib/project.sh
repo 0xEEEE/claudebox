@@ -122,6 +122,7 @@ init_slot_dir() {
     
     mkdir -p "$dir/.config"
     mkdir -p "$dir/.cache"
+    mkdir -p "$dir/.local/bin"
     # Don't pre-create .claude.json - let Claude create it naturally
 }
 
@@ -188,7 +189,7 @@ determine_next_start_container() {
         [ -d "$dir" ] || continue
         
         # Check if a container with this slot name is running
-        if ! docker ps --format "{{.Names}}" | grep -q "^claudebox-.*-${name}$"; then
+        if ! $(runtime_cmd) ps --format "{{.Names}}" | grep -q "^claudebox-.*-${name}$"; then
             echo "$name"
             return 0
         fi
@@ -213,7 +214,7 @@ find_ready_slot() {
         [ -f "$dir/.claude/.credentials.json" ] || continue
         
         # Check if not running (inactive)
-        if ! docker ps --format "{{.Names}}" | grep -q "^claudebox-.*-${name}$"; then
+        if ! $(runtime_cmd) ps --format "{{.Names}}" | grep -q "^claudebox-.*-${name}$"; then
             echo "$name"
             return 0
         fi
@@ -237,7 +238,7 @@ find_inactive_slot() {
         [ -d "$dir" ] || continue
         
         # Check if not running (inactive)
-        if ! docker ps --format "{{.Names}}" | grep -q "^claudebox-.*-${name}$"; then
+        if ! $(runtime_cmd) ps --format "{{.Names}}" | grep -q "^claudebox-.*-${name}$"; then
             echo "$name"
             return 0
         fi
@@ -328,9 +329,9 @@ list_all_projects() {
         local image_status="❌"
         local image_size="-"
         
-        if docker image inspect "$image_name" >/dev/null 2>&1; then
+        if $(runtime_cmd) image inspect "$image_name" >/dev/null 2>&1; then
             image_status="✅"
-            image_size=$(docker images --filter "reference=$image_name" --format "{{.Size}}")
+            image_size=$($(runtime_cmd) images --filter "reference=$image_name" --format "{{.Size}}")
         fi
         
         printf "%10s  %s  Slots: %d/%d  %s\n" "$image_size" "$image_status" "$active_slots" "$slot_count" "$parent_name"
@@ -447,7 +448,7 @@ list_project_slots() {
             fi
             
             # Check if a container with this slot name is running
-            if docker ps --format "{{.Names}}" | grep -q "^claudebox-.*-${name}$"; then
+            if $(runtime_cmd) ps --format "{{.Names}}" | grep -q "^claudebox-.*-${name}$"; then
                 run_icon="🟢"
                 run_text="Active"
             else

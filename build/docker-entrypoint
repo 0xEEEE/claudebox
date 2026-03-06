@@ -57,6 +57,14 @@ elif [ -f /home/DOCKERUSER/init-firewall ]; then
     /home/DOCKERUSER/init-firewall || true
 fi
 
+# Seed Claude CLI binary on first run (persistent mount starts empty)
+CLAUDE_BIN="/home/DOCKERUSER/.local/bin/claude"
+CLAUDE_IMAGE_BIN="/usr/local/lib/claudebox/claude-bin"
+if [ ! -f "$CLAUDE_BIN" ] && [ -f "$CLAUDE_IMAGE_BIN" ]; then
+    run_as_user cp "$CLAUDE_IMAGE_BIN" "$CLAUDE_BIN"
+    run_as_user chmod +x "$CLAUDE_BIN"
+fi
+
 # Start background inotify watcher for allowlist hot-reload
 # Monitors the allowlist file and adds new domains to firewall rules without restart
 if command -v inotifywait >/dev/null 2>&1 && [ "${DISABLE_FIREWALL:-false}" != "true" ] && \

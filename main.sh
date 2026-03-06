@@ -175,7 +175,11 @@ main() {
     esac
     
     # Step 5a: Build core image if it doesn't exist
+    # If --no-cache with rebuild, delete core image first so it gets rebuilt
     local core_image="claudebox-core"
+    if [[ "${REBUILD:-false}" == "true" ]] && [[ "${CLAUDEBOX_FORCE_NO_CACHE:-false}" == "true" ]]; then
+        $(runtime_cmd) rmi -f "$core_image" 2>/dev/null || true
+    fi
     if ! $(runtime_cmd) image inspect "$core_image" >/dev/null 2>&1; then
         # Show logo during build
         logo
@@ -216,6 +220,9 @@ main() {
         
         # Build core image
         local build_cmd_args=()
+        if [[ "${CLAUDEBOX_FORCE_NO_CACHE:-false}" == "true" ]]; then
+            build_cmd_args+=(--no-cache)
+        fi
         if [[ "$RUNTIME_HAS_BUILDKIT" == "true" ]]; then
             export DOCKER_BUILDKIT=1
             build_cmd_args+=(--progress="${BUILDKIT_PROGRESS:-auto}")
