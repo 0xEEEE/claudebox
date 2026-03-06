@@ -130,18 +130,25 @@ IPV6_REGEX='^[0-9a-fA-F:]+(/[0-9]+)?$'
 # Load custom allowlist if exists
 if [ -f "$ALLOWLIST_FILE" ]; then
     log "Loading custom allowlist from $ALLOWLIST_FILE"
+    CUSTOM_COUNT=0
     while IFS= read -r line; do
-        [[ "$line" =~ ^#.* ]] && continue
-        [[ -z "$line" ]] && continue
+        # Skip comments and empty lines
+        case "$line" in
+            '#'*|'') continue ;;
+        esac
         domain="${line#\*.}"
         domain="$(echo "$domain" | xargs)"
         # Validate domain format before adding
         if [[ -n "$domain" ]] && [[ "$domain" =~ $VALID_DOMAIN_REGEX ]]; then
             ALLOWED_DOMAINS="$ALLOWED_DOMAINS $domain"
+            CUSTOM_COUNT=$((CUSTOM_COUNT + 1))
         else
             log_error "Skipping invalid domain format: $domain"
         fi
     done < "$ALLOWLIST_FILE"
+    log "Loaded $CUSTOM_COUNT custom domains from allowlist"
+else
+    log "No custom allowlist found at $ALLOWLIST_FILE"
 fi
 
 # Configure allowed domains using ipset (preferred) or iptables fallback
@@ -229,18 +236,33 @@ fw_allow_ip() {
 
 # Only proceed with ipset if still functional
 if [ "$IPSET_FUNCTIONAL" = "true" ]; then
+    DOMAIN_COUNT=0
+    RESOLVE_OK=0
+    RESOLVE_FAIL=0
+    IP_ADDED=0
     for domain in $ALLOWED_DOMAINS; do
+        DOMAIN_COUNT=$((DOMAIN_COUNT + 1))
         if [[ "$domain" =~ $IPV4_REGEX ]]; then
             ipset_add_ip "$domain"
+            IP_ADDED=$((IP_ADDED + 1))
         elif [[ "$domain" =~ $IPV6_REGEX ]]; then
             ipset_add_ip "$domain"
+            IP_ADDED=$((IP_ADDED + 1))
         else
             ips=$(getent ahosts "$domain" 2>/dev/null | awk '{print $1}' | sort -u) || true
-            for ip in $ips; do
-                ipset_add_domain "$ip"
-            done
+            if [ -n "$ips" ]; then
+                RESOLVE_OK=$((RESOLVE_OK + 1))
+                for ip in $ips; do
+                    ipset_add_domain "$ip"
+                    IP_ADDED=$((IP_ADDED + 1))
+                done
+            else
+                RESOLVE_FAIL=$((RESOLVE_FAIL + 1))
+                log "Warning: DNS failed for: $domain"
+            fi
         fi
     done
+    log "Resolved $DOMAIN_COUNT domains: $RESOLVE_OK ok, $RESOLVE_FAIL failed, $IP_ADDED IPs added"
 
     # Apply iptables rules with ipset matching (IPv4)
     iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT 2>/dev/null || true
@@ -257,6 +279,7 @@ fi
 if [ "$IPSET_FUNCTIONAL" != "true" ]; then
     log "Using iptables/ip6tables rules directly (ipset not available)"
     IPTABLES_RULES_ADDED=0
+    RESOLVE_FAIL=0
     for domain in $ALLOWED_DOMAINS; do
         if [[ "$domain" =~ $IPV4_REGEX ]] || [[ "$domain" =~ $IPV6_REGEX ]]; then
             if fw_allow_ip "$domain"; then
@@ -267,7 +290,8 @@ if [ "$IPSET_FUNCTIONAL" != "true" ]; then
         else
             ips=$(getent ahosts "$domain" 2>/dev/null | awk '{print $1}' | sort -u) || true
             if [ -z "$ips" ]; then
-                log "Warning: Could not resolve domain: $domain"
+                RESOLVE_FAIL=$((RESOLVE_FAIL + 1))
+                log "Warning: DNS failed for: $domain"
             fi
             for ip in $ips; do
                 if fw_allow_ip "$ip"; then
@@ -278,7 +302,7 @@ if [ "$IPSET_FUNCTIONAL" != "true" ]; then
             done
         fi
     done
-    log "Added $IPTABLES_RULES_ADDED iptables/ip6tables rules"
+    log "Added $IPTABLES_RULES_ADDED rules ($RESOLVE_FAIL DNS failures)"
 fi
 
 # Set default-deny policy (this is the critical security step)
