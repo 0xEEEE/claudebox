@@ -109,7 +109,7 @@ write_counter() {
 init_slot_dir() {
     local dir="$1"
     mkdir -p "$dir"
-    
+
     # Check if claude/ directory exists in the claudebox root to seed .claude
     local claude_source="${CLAUDEBOX_SCRIPT_DIR:-${SCRIPT_DIR}}/claude"
     if [[ -d "$claude_source" ]]; then
@@ -119,11 +119,155 @@ init_slot_dir() {
         # Fall back to creating empty .claude directory
         mkdir -p "$dir/.claude"
     fi
-    
+
     mkdir -p "$dir/.config"
     mkdir -p "$dir/.cache"
     mkdir -p "$dir/.local/bin"
-    # Don't pre-create .claude.json - let Claude create it naturally
+
+    # Seed authentication from global auth directory
+    seed_slot_auth "$dir"
+}
+
+# ============================================================================
+# Global Auth Management
+# ============================================================================
+
+# Get the global auth directory path
+get_auth_dir() {
+    printf '%s' "${CLAUDEBOX_HOME:-$HOME/.claudebox}/auth"
+}
+
+# Initialize global auth directory
+init_auth_dir() {
+    local auth_dir
+    auth_dir=$(get_auth_dir)
+    if [[ ! -d "$auth_dir" ]]; then
+        mkdir -p "$auth_dir"
+        chmod 700 "$auth_dir"
+    fi
+}
+
+# Extract auth-critical fields from .claude.json to auth seed file
+# Usage: extract_auth_seed <path-to-claude.json>
+extract_auth_seed() {
+    local claude_json="$1"
+    local auth_dir
+    auth_dir=$(get_auth_dir)
+
+    if [[ ! -f "$claude_json" ]]; then
+        return 1
+    fi
+
+    # Requires jq
+    if ! command -v jq >/dev/null 2>&1; then
+        if [[ "$VERBOSE" == "true" ]]; then
+            echo "[DEBUG] jq not available, skipping auth seed extraction" >&2
+        fi
+        return 1
+    fi
+
+    init_auth_dir
+
+    # Extract only auth-critical fields
+    local seed_file="$auth_dir/.auth-seed.json"
+    if jq '{
+        oauthAccount: .oauthAccount,
+        userID: .userID,
+        hasAvailableSubscription: .hasAvailableSubscription,
+        hasCompletedOnboarding: .hasCompletedOnboarding,
+        installMethod: .installMethod
+    } | with_entries(select(.value != null))' "$claude_json" > "$seed_file" 2>/dev/null && [[ -s "$seed_file" ]]; then
+        chmod 600 "$seed_file"
+        if [[ "$VERBOSE" == "true" ]]; then
+            echo "[DEBUG] Auth seed extracted to $seed_file" >&2
+        fi
+        return 0
+    else
+        rm -f "$seed_file"
+        return 1
+    fi
+}
+
+# Extract .credentials.json to global auth directory
+# Usage: extract_auth_credentials <path-to-credentials.json>
+extract_auth_credentials() {
+    local creds_file="$1"
+    local auth_dir
+    auth_dir=$(get_auth_dir)
+
+    if [[ ! -f "$creds_file" ]]; then
+        return 1
+    fi
+
+    init_auth_dir
+
+    local global_creds="$auth_dir/.credentials.json"
+    cp "$creds_file" "$global_creds"
+    chmod 600 "$global_creds"
+
+    if [[ "$VERBOSE" == "true" ]]; then
+        echo "[DEBUG] Credentials extracted to $global_creds" >&2
+    fi
+    return 0
+}
+
+# Seed a slot directory with global auth (credentials + .claude.json seed)
+# Usage: seed_slot_auth <slot-dir>
+seed_slot_auth() {
+    local slot_dir="$1"
+    local auth_dir
+    auth_dir=$(get_auth_dir)
+
+    # Skip if no global auth exists
+    if [[ ! -d "$auth_dir" ]]; then
+        return 0
+    fi
+
+    local global_creds="$auth_dir/.credentials.json"
+    local seed_file="$auth_dir/.auth-seed.json"
+
+    # Copy .credentials.json from global auth if slot doesn't have one
+    if [[ -f "$global_creds" ]]; then
+        local slot_creds="$slot_dir/.claude/.credentials.json"
+        # Only copy if slot doesn't already have credentials
+        if [[ ! -f "$slot_creds" ]] && [[ ! -L "$slot_creds" ]]; then
+            mkdir -p "$slot_dir/.claude"
+            cp "$global_creds" "$slot_creds"
+            chmod 600 "$slot_creds"
+            if [[ "${VERBOSE:-false}" == "true" ]]; then
+                echo "[DEBUG] Seeded credentials from global auth: $slot_creds" >&2
+            fi
+        fi
+    fi
+
+    # Seed .claude.json from auth seed if it doesn't exist
+    if [[ -f "$seed_file" ]] && [[ ! -f "$slot_dir/.claude.json" ]]; then
+        cp "$seed_file" "$slot_dir/.claude.json"
+        chmod 600 "$slot_dir/.claude.json"
+        if [[ "${VERBOSE:-false}" == "true" ]]; then
+            echo "[DEBUG] Seeded .claude.json from auth seed" >&2
+        fi
+    fi
+
+    return 0
+}
+
+# Sync auth from an authenticated slot to global auth directory
+# Usage: sync_slot_to_global_auth <slot-dir>
+sync_slot_to_global_auth() {
+    local slot_dir="$1"
+    local creds_file="$slot_dir/.claude/.credentials.json"
+    local claude_json="$slot_dir/.claude.json"
+
+    # Extract credentials to global auth directory
+    if [[ -f "$creds_file" ]]; then
+        extract_auth_credentials "$creds_file"
+    fi
+
+    # Extract auth seed from .claude.json
+    if [[ -f "$claude_json" ]]; then
+        extract_auth_seed "$claude_json"
+    fi
 }
 
 # Create or reuse a container slot:
@@ -613,6 +757,7 @@ sync_commands_to_project() {
 export -f crc32_word crc32_string crc32_file
 export -f slugify_path generate_container_name generate_parent_folder_name get_parent_dir
 export -f init_project_dir init_slot_dir
+export -f get_auth_dir init_auth_dir extract_auth_seed extract_auth_credentials seed_slot_auth sync_slot_to_global_auth
 export -f read_counter write_counter
 export -f create_container determine_next_start_container find_ready_slot find_inactive_slot
 export -f get_project_folder_name get_image_name _get_project_slug

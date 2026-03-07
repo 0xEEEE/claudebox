@@ -241,10 +241,16 @@ run_claudebox_container() {
     if [[ ! -d "$PROJECT_SLOT_DIR/.claude" ]]; then
         mkdir -p "$PROJECT_SLOT_DIR/.claude"
     fi
-    
+
     docker_args+=(-v "$PROJECT_SLOT_DIR/.claude":/home/$DOCKER_USER/.claude)
-    
-    # Mount .claude.json only if it already exists (from previous session)
+
+    # Mount global auth directory for cross-slot credential sharing
+    local auth_dir="${CLAUDEBOX_HOME:-$HOME/.claudebox}/auth"
+    if [[ -d "$auth_dir" ]]; then
+        docker_args+=(-v "$auth_dir":/home/$DOCKER_USER/.claudebox/auth)
+    fi
+
+    # Mount .claude.json only if it already exists (from previous session or auth seed)
     # Security fix: Validate file permissions before mounting
     if [[ -f "$PROJECT_SLOT_DIR/.claude.json" ]]; then
         # Check and fix permissions if world-readable

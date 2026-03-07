@@ -321,6 +321,9 @@ main() {
     if [[ -n "$project_folder_name" ]] && [[ "$project_folder_name" != "NONE" ]]; then
         PROJECT_SLOT_DIR="$PROJECT_PARENT_DIR/$project_folder_name"
         export PROJECT_SLOT_DIR
+
+        # Migrate existing slot auth to global auth directory (one-time)
+        sync_slot_to_global_auth "$PROJECT_SLOT_DIR"
     fi
     
     # Handle rebuild if requested

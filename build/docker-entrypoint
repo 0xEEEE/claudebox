@@ -770,11 +770,42 @@ else
                 fi
             fi
 
-            # After claude exits, copy .claude.json if it was created
+            # After claude exits, sync auth state
             # Security fix: Validate CLAUDEBOX_SLOT_NAME to prevent path traversal
             if [[ -n "${CLAUDEBOX_SLOT_NAME:-}" ]] && [[ "$CLAUDEBOX_SLOT_NAME" =~ ^[a-f0-9_-]+$ ]]; then
-                if [[ -f "$HOME/.claude.json" ]] && [[ ! -f "$HOME/.claudebox/${CLAUDEBOX_SLOT_NAME}/.claude.json" ]]; then
-                    cp "$HOME/.claude.json" "$HOME/.claudebox/${CLAUDEBOX_SLOT_NAME}/.claude.json"
+                local _slot_dir="$HOME/.claudebox/${CLAUDEBOX_SLOT_NAME}"
+
+                # Copy .claude.json to slot if it was created and slot copy doesn't exist
+                if [[ -f "$HOME/.claude.json" ]] && [[ ! -f "$_slot_dir/.claude.json" ]]; then
+                    cp "$HOME/.claude.json" "$_slot_dir/.claude.json"
+                fi
+
+                # Extract auth to global auth directory for sharing across slots
+                local _auth_dir="$HOME/.claudebox/auth"
+                if [[ -f "$HOME/.claude/.credentials.json" ]]; then
+                    mkdir -p "$_auth_dir"
+                    chmod 700 "$_auth_dir"
+                    cp "$HOME/.claude/.credentials.json" "$_auth_dir/.credentials.json"
+                    chmod 600 "$_auth_dir/.credentials.json"
+                fi
+
+                # Extract auth seed from .claude.json
+                if [[ -f "$HOME/.claude.json" ]] && command -v jq >/dev/null 2>&1; then
+                    local _seed_file="$_auth_dir/.auth-seed.json"
+                    mkdir -p "$_auth_dir"
+                    chmod 700 "$_auth_dir"
+                    jq '{
+                        oauthAccount: .oauthAccount,
+                        userID: .userID,
+                        hasAvailableSubscription: .hasAvailableSubscription,
+                        hasCompletedOnboarding: .hasCompletedOnboarding,
+                        installMethod: .installMethod
+                    } | with_entries(select(.value != null))' "$HOME/.claude.json" > "$_seed_file" 2>/dev/null
+                    if [[ -s "$_seed_file" ]]; then
+                        chmod 600 "$_seed_file"
+                    else
+                        rm -f "$_seed_file"
+                    fi
                 fi
             fi
         '
