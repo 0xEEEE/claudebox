@@ -261,10 +261,12 @@ get_profile_rust() {
 COPY --chown=claude vendor/scripts/profiles/rustup.sh /tmp/rustup.sh
 COPY --chown=claude vendor/scripts/checksums-profiles.sha256 /tmp/checksums-profiles.sha256
 RUN cd /tmp && sha256sum -c checksums-profiles.sha256 --ignore-missing 2>/dev/null | grep -q "rustup.sh: OK" || (echo "Checksum verification failed for rustup.sh" && exit 1)
+USER claude
 RUN sh /tmp/rustup.sh -y
 ENV PATH="/home/claude/.cargo/bin:$PATH"
 # Install rust-analyzer LSP server
 RUN rustup component add rust-analyzer
+USER root
 RUN rm -f /tmp/rustup.sh /tmp/checksums-profiles.sha256
 EOF
 }
