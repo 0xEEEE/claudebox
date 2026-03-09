@@ -242,13 +242,56 @@ run_claudebox_container() {
         mkdir -p "$PROJECT_SLOT_DIR/.claude"
     fi
 
-    docker_args+=(-v "$PROJECT_SLOT_DIR/.claude":/home/$DOCKER_USER/.claude)
+    # Determine auth mode from slot marker file
+    local auth_mode="shared"
+    if [[ -f "$PROJECT_SLOT_DIR/.isolated-auth" ]]; then
+        auth_mode="isolated"
+    fi
 
-    # Mount global auth directory for cross-slot credential sharing
     local auth_dir="${CLAUDEBOX_HOME:-$HOME/.claudebox}/auth"
+    local global_creds="$auth_dir/.credentials.json"
+
+    if [[ "$auth_mode" == "shared" ]]; then
+        # Shared auth: mount global credentials directly into .claude/
+        # All concurrent slots share the same file — token refresh propagates instantly
+        if [[ ! -d "$auth_dir" ]]; then
+            mkdir -p "$auth_dir"
+            chmod 700 "$auth_dir"
+        fi
+        # If slot has credentials but global doesn't, migrate them
+        local slot_creds="$PROJECT_SLOT_DIR/.claude/.credentials.json"
+        if [[ -f "$slot_creds" ]] && [[ ! -f "$global_creds" ]]; then
+            cp "$slot_creds" "$global_creds"
+            chmod 600 "$global_creds"
+        fi
+        docker_args+=(-v "$PROJECT_SLOT_DIR/.claude":/home/$DOCKER_USER/.claude)
+        # Only bind-mount global credentials if they exist and are non-empty
+        # Otherwise fall back to slot credentials (first login or no auth yet)
+        if [[ -f "$global_creds" ]] && [[ -s "$global_creds" ]]; then
+            docker_args+=(-v "$global_creds":/home/$DOCKER_USER/.claude/.credentials.json)
+            if [[ "$VERBOSE" == "true" ]]; then
+                echo "[DEBUG] Auth mode: shared (global credentials mounted)" >&2
+            fi
+        else
+            if [[ "$VERBOSE" == "true" ]]; then
+                echo "[DEBUG] Auth mode: shared (no global credentials yet, using slot)" >&2
+            fi
+        fi
+    else
+        # Isolated auth: each slot uses its own credentials copy
+        docker_args+=(-v "$PROJECT_SLOT_DIR/.claude":/home/$DOCKER_USER/.claude)
+        if [[ "$VERBOSE" == "true" ]]; then
+            echo "[DEBUG] Auth mode: isolated (per-slot credentials)" >&2
+        fi
+    fi
+
+    # Mount global auth directory for entrypoint auth extraction
     if [[ -d "$auth_dir" ]]; then
         docker_args+=(-v "$auth_dir":/home/$DOCKER_USER/.claudebox/auth)
     fi
+
+    # Pass auth mode to container for entrypoint awareness
+    docker_args+=(-e "CLAUDEBOX_AUTH_MODE=$auth_mode")
 
     # Mount .claude.json only if it already exists (from previous session or auth seed)
     # Security fix: Validate file permissions before mounting
@@ -567,10 +610,19 @@ run_claudebox_container() {
         "$IMAGE_NAME"
     )
     
-    # Add any additional arguments
-    # Bash 3.2 safe array expansion
+    # Add any additional arguments, filtering out control flags
+    # Control flags are consumed by the host/docker setup, not passed to Claude CLI
     if [[ ${#container_args[@]} -gt 0 ]]; then
-        docker_args+=(${container_args[@]+"${container_args[@]}"})
+        for arg in ${container_args[@]+"${container_args[@]}"}; do
+            case "$arg" in
+                --enable-sudo|--disable-firewall|--no-host-skills|--no-host-lsp)
+                    # Control flag already consumed above, skip
+                    ;;
+                *)
+                    docker_args+=("$arg")
+                    ;;
+            esac
+        done
     fi
     
     # Run the container

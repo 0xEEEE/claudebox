@@ -7,7 +7,7 @@
 # ============================================================================
 
 # Four flag buckets (Bash 3.2 compatible - no associative arrays)
-readonly HOST_ONLY_FLAGS=(--verbose rebuild --no-cache)
+readonly HOST_ONLY_FLAGS=(--verbose rebuild --no-cache --isolated-auth)
 readonly CONTROL_FLAGS=(--enable-sudo --disable-firewall --no-host-skills --no-host-lsp)
 readonly SCRIPT_COMMANDS=(shell create slot slots revoke profiles projects profile info help -h --help add remove install allowlist clean save project tmux kill)
 

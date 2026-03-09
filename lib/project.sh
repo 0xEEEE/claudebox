@@ -124,8 +124,27 @@ init_slot_dir() {
     mkdir -p "$dir/.cache"
     mkdir -p "$dir/.local/bin"
 
-    # Seed authentication from global auth directory
-    seed_slot_auth "$dir"
+    # Check if isolated auth mode is requested
+    local is_isolated=false
+    if [[ -n "${CLI_HOST_FLAGS+x}" ]] && [[ ${#CLI_HOST_FLAGS[@]} -gt 0 ]]; then
+        for flag in "${CLI_HOST_FLAGS[@]}"; do
+            if [[ "$flag" == "--isolated-auth" ]]; then
+                is_isolated=true
+                break
+            fi
+        done
+    fi
+
+    if [[ "$is_isolated" == "true" ]]; then
+        # Mark slot as isolated auth
+        touch "$dir/.isolated-auth"
+        if [[ "${VERBOSE:-false}" == "true" ]]; then
+            echo "[DEBUG] Slot created with isolated auth" >&2
+        fi
+    else
+        # Seed authentication from global auth directory
+        seed_slot_auth "$dir"
+    fi
 }
 
 # ============================================================================
@@ -211,7 +230,8 @@ extract_auth_credentials() {
     return 0
 }
 
-# Seed a slot directory with global auth (credentials + .claude.json seed)
+# Seed a slot directory with global auth (.claude.json seed + credentials copy)
+# Only called for shared auth slots (isolated slots skip this entirely)
 # Usage: seed_slot_auth <slot-dir>
 seed_slot_auth() {
     local slot_dir="$1"
@@ -226,10 +246,19 @@ seed_slot_auth() {
     local global_creds="$auth_dir/.credentials.json"
     local seed_file="$auth_dir/.auth-seed.json"
 
-    # Copy .credentials.json from global auth if slot doesn't have one
+    # Seed .claude.json from auth seed if it doesn't exist
+    if [[ -f "$seed_file" ]] && [[ ! -f "$slot_dir/.claude.json" ]]; then
+        cp "$seed_file" "$slot_dir/.claude.json"
+        chmod 600 "$slot_dir/.claude.json"
+        if [[ "${VERBOSE:-false}" == "true" ]]; then
+            echo "[DEBUG] Seeded .claude.json from auth seed" >&2
+        fi
+    fi
+
+    # Copy credentials so find_ready_slot() can detect auth status
+    # In shared mode, the bind-mount at runtime overrides this copy
     if [[ -f "$global_creds" ]]; then
         local slot_creds="$slot_dir/.claude/.credentials.json"
-        # Only copy if slot doesn't already have credentials
         if [[ ! -f "$slot_creds" ]] && [[ ! -L "$slot_creds" ]]; then
             mkdir -p "$slot_dir/.claude"
             cp "$global_creds" "$slot_creds"
@@ -237,15 +266,6 @@ seed_slot_auth() {
             if [[ "${VERBOSE:-false}" == "true" ]]; then
                 echo "[DEBUG] Seeded credentials from global auth: $slot_creds" >&2
             fi
-        fi
-    fi
-
-    # Seed .claude.json from auth seed if it doesn't exist
-    if [[ -f "$seed_file" ]] && [[ ! -f "$slot_dir/.claude.json" ]]; then
-        cp "$seed_file" "$slot_dir/.claude.json"
-        chmod 600 "$slot_dir/.claude.json"
-        if [[ "${VERBOSE:-false}" == "true" ]]; then
-            echo "[DEBUG] Seeded .claude.json from auth seed" >&2
         fi
     fi
 
@@ -268,6 +288,35 @@ sync_slot_to_global_auth() {
     if [[ -f "$claude_json" ]]; then
         extract_auth_seed "$claude_json"
     fi
+}
+
+# Ensure global auth directory is populated from any authenticated slot
+# Scans all slots in the project parent directory to find credentials
+# Usage: ensure_global_auth <project-parent-dir>
+ensure_global_auth() {
+    local parent_dir="$1"
+    local auth_dir
+    auth_dir=$(get_auth_dir)
+
+    # Skip if global auth already has credentials
+    if [[ -f "$auth_dir/.credentials.json" ]] && [[ -s "$auth_dir/.credentials.json" ]]; then
+        return 0
+    fi
+
+    # Scan all slot directories for existing credentials
+    if [[ -d "$parent_dir" ]]; then
+        for slot_dir in "$parent_dir"/*/; do
+            if [[ -d "$slot_dir" ]] && [[ -f "$slot_dir/.claude/.credentials.json" ]]; then
+                sync_slot_to_global_auth "$slot_dir"
+                if [[ "${VERBOSE:-false}" == "true" ]]; then
+                    echo "[DEBUG] Migrated auth from slot: $(basename "$slot_dir")" >&2
+                fi
+                return 0
+            fi
+        done
+    fi
+
+    return 0
 }
 
 # Create or reuse a container slot:
@@ -583,7 +632,10 @@ list_project_slots() {
         
         if [ -d "$dir" ]; then
             # Check authentication status
-            if [ -f "$dir/.claude/.credentials.json" ]; then
+            if [ -f "$dir/.isolated-auth" ]; then
+                auth_icon="🔐"
+                auth_text="Isolated"
+            elif [ -f "$dir/.claude/.credentials.json" ]; then
                 auth_icon="✔️"
                 auth_text="Authenticated"
             else
@@ -757,7 +809,7 @@ sync_commands_to_project() {
 export -f crc32_word crc32_string crc32_file
 export -f slugify_path generate_container_name generate_parent_folder_name get_parent_dir
 export -f init_project_dir init_slot_dir
-export -f get_auth_dir init_auth_dir extract_auth_seed extract_auth_credentials seed_slot_auth sync_slot_to_global_auth
+export -f get_auth_dir init_auth_dir extract_auth_seed extract_auth_credentials seed_slot_auth sync_slot_to_global_auth ensure_global_auth
 export -f read_counter write_counter
 export -f create_container determine_next_start_container find_ready_slot find_inactive_slot
 export -f get_project_folder_name get_image_name _get_project_slug
