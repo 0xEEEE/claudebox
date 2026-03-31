@@ -319,8 +319,9 @@ run_claudebox_container() {
     # Mount .cache directory
     docker_args+=(-v "$PROJECT_SLOT_DIR/.cache":/home/$DOCKER_USER/.cache)
 
-    # Mount .local/bin for persistent Claude CLI updates
-    docker_args+=(-v "$PROJECT_SLOT_DIR/.local/bin":/home/$DOCKER_USER/.local/bin)
+    # Mount .local for persistent Claude CLI updates
+    # Both .local/bin (symlink) and .local/share/claude/versions (binaries) need persistence
+    docker_args+=(-v "$PROJECT_SLOT_DIR/.local":/home/$DOCKER_USER/.local)
     
     # Mount SSH agent socket only - never mount host SSH directory or config
     # Security: Private keys and host config never enter container
@@ -610,13 +611,23 @@ run_claudebox_container() {
         "$IMAGE_NAME"
     )
     
-    # Add any additional arguments, filtering out control flags
-    # Control flags are consumed by the host/docker setup, not passed to Claude CLI
+    # Add entrypoint control flags (consumed by docker-entrypoint, not Claude CLI)
+    # These must be passed as container arguments so the entrypoint can parse them
+    for flag in ${container_args[@]+"${container_args[@]}"} ${CLI_CONTROL_FLAGS[@]+"${CLI_CONTROL_FLAGS[@]}"}; do
+        case "$flag" in
+            --enable-sudo|--disable-firewall)
+                docker_args+=("$flag")
+                ;;
+        esac
+    done
+
+    # Add remaining arguments, filtering out all control flags
+    # Control flags are consumed by host/docker setup or entrypoint, not passed to Claude CLI
     if [[ ${#container_args[@]} -gt 0 ]]; then
         for arg in ${container_args[@]+"${container_args[@]}"}; do
             case "$arg" in
                 --enable-sudo|--disable-firewall|--no-host-skills|--no-host-lsp)
-                    # Control flag already consumed above, skip
+                    # Already handled above or host-only, skip
                     ;;
                 *)
                     docker_args+=("$arg")
