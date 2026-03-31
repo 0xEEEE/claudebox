@@ -161,6 +161,38 @@ _cmd_add() {
         fi
     fi
     
+    # Auto-add profile-required domains to firewall allowlist
+    local parent_dir
+    parent_dir=$(get_parent_dir "$PROJECT_DIR")
+    local allowlist_file="$parent_dir/allowlist"
+    local domains_added=()
+
+    for profile in "${selected[@]}"; do
+        local domains
+        domains=$(get_profile_domains "$profile")
+        if [[ -n "$domains" ]]; then
+            # Create allowlist with header if it doesn't exist
+            if [[ ! -f "$allowlist_file" ]]; then
+                printf '# ClaudeBox Firewall Allowlist\n# One domain per line. Lines starting with # are comments.\n\n' > "$allowlist_file"
+            fi
+            for domain in $domains; do
+                # Skip if domain already exists in allowlist
+                if ! grep -qxF "$domain" "$allowlist_file" 2>/dev/null; then
+                    printf '%s\n' "$domain" >> "$allowlist_file"
+                    domains_added+=("$domain")
+                fi
+            done
+        fi
+    done
+
+    if [[ ${#domains_added[@]} -gt 0 ]]; then
+        cecho "Added ${#domains_added[@]} domains to firewall allowlist:" "$GREEN"
+        for d in "${domains_added[@]}"; do
+            printf '  %s\n' "$d"
+        done
+        echo
+    fi
+
     # Only show rebuild message for non-Python profiles
     local needs_rebuild=false
     for profile in "${selected[@]}"; do
@@ -169,7 +201,7 @@ _cmd_add() {
             break
         fi
     done
-    
+
     if [[ "$needs_rebuild" == "true" ]]; then
         warn "The Docker image will be rebuilt with new profiles on next run."
     fi
