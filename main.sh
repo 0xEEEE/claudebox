@@ -653,12 +653,16 @@ LABEL claudebox.project=\"$project_folder_name\""
     local final_dockerfile="$base_dockerfile"
 
     # Replace {{PROFILE_INSTALLATIONS}} placeholder
+    # Bash 3.2: & in replacement string is treated as backreference to matched text
+    # Must escape & as \& to insert literal ampersands
     local pi_placeholder='{{PROFILE_INSTALLATIONS}}'
-    final_dockerfile="${final_dockerfile//$pi_placeholder/$profile_installations}"
+    local safe_installations="${profile_installations//&/\\&}"
+    final_dockerfile="${final_dockerfile//$pi_placeholder/$safe_installations}"
 
     # Replace {{LABELS}} placeholder
     local labels_placeholder='{{LABELS}}'
-    final_dockerfile="${final_dockerfile//$labels_placeholder/$labels}"
+    local safe_labels="${labels//&/\\&}"
+    final_dockerfile="${final_dockerfile//$labels_placeholder/$safe_labels}"
 
     # Guard: ensure no unreplaced placeholders remain
     if [[ "$final_dockerfile" == *'{{PROFILE_INSTALLATIONS}}'* ]] || [[ "$final_dockerfile" == *'{{LABELS}}'* ]]; then
