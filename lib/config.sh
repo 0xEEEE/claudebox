@@ -36,6 +36,7 @@ get_profile_packages() {
         security) echo "nmap tcpdump wireshark-common netcat-openbsd john hashcat hydra" ;;
         ml) echo "" ;;  # Just cmake needed, comes from build-tools now
         bash) echo "shellcheck shfmt bats" ;;  # Bash dev tools, LSP via bun
+        apple) echo "" ;;  # Swift installed from official tarball
         *) echo "" ;;
     esac
 }
@@ -64,12 +65,54 @@ get_profile_description() {
         security) echo "Security Tools (scanners, crackers, packet tools)" ;;
         ml) echo "Machine Learning (build layer only; Python via uv)" ;;
         bash) echo "Bash/Shell Development (shellcheck, shfmt, bats, LSP via bun)" ;;
+        apple) echo "Apple Platform Development (Swift toolchain, SwiftLint, SwiftFormat, sourcekit-lsp)" ;;
+        *) echo "" ;;
+    esac
+}
+
+# Get firewall allowlist domains required by a profile
+# Returns space-separated list of domains (package registries, docs, APIs)
+get_profile_domains() {
+    case "$1" in
+        rust)
+            echo "crates.io index.crates.io static.crates.io static.rust-lang.org doc.rust-lang.org docs.rs"
+            ;;
+        python|ml|datascience)
+            echo "pypi.org files.pythonhosted.org"
+            ;;
+        go)
+            echo "proxy.golang.org sum.golang.org pkg.go.dev go.dev"
+            ;;
+        flutter)
+            echo "pub.dev storage.flutter-io.cn"
+            ;;
+        javascript)
+            echo "registry.npmjs.org registry.yarnpkg.com registry.bun.sh nodejs.org"
+            ;;
+        java)
+            echo "repo1.maven.org repo.maven.apache.org plugins.gradle.org services.gradle.org"
+            ;;
+        ruby)
+            echo "rubygems.org index.rubygems.org"
+            ;;
+        php)
+            echo "packagist.org repo.packagist.org getcomposer.org"
+            ;;
+        devops)
+            echo "registry.hub.docker.com registry-1.docker.io auth.docker.io production.cloudflare.docker.com releases.hashicorp.com"
+            ;;
+        security)
+            echo "github.com pypi.org rubygems.org pkg.go.dev rustsec.org nvd.nist.gov swiftpackageindex.com developer.apple.com osv.dev api.osv.dev"
+            ;;
+        apple)
+            echo "swift.org download.swift.org developer.apple.com github.com cocoapods.org cdn.cocoapods.org swiftpackageindex.com"
+            ;;
         *) echo "" ;;
     esac
 }
 
 get_all_profile_names() {
-    echo "core build-tools shell networking bash c openwrt rust python go flutter javascript java ruby php database devops web embedded datascience security ml"
+    echo "core build-tools shell networking bash c openwrt rust python go flutter javascript java ruby php database devops web embedded datascience security ml apple"
 }
 
 profile_exists() {
@@ -85,7 +128,7 @@ expand_profile() {
         c) echo "core build-tools c" ;;
         openwrt) echo "core build-tools openwrt" ;;
         ml) echo "core build-tools ml" ;;
-        rust|go|flutter|python|php|ruby|java|database|devops|web|embedded|datascience|security|javascript|bash)
+        rust|go|flutter|python|php|ruby|java|database|devops|web|embedded|datascience|security|javascript|bash|apple)
             echo "core $1"
             ;;
         shell|networking|build-tools|core)
@@ -460,9 +503,48 @@ RUN ln -sf /home/claude/.bun/bin/bash-language-server /usr/local/bin/bash-langua
 EOF
 }
 
-export -f _read_ini get_profile_packages get_profile_description get_all_profile_names profile_exists expand_profile
+get_profile_apple() {
+    cat << 'EOF'
+# Swift toolchain installation (requires network access to swift.org)
+# Security: Verifies SHA256 checksum before extraction
+RUN ARCH=$(dpkg --print-architecture) && \
+    SWIFT_VERSION="6.2.4" && \
+    SWIFT_PLATFORM="ubuntu22.04" && \
+    SWIFT_PLATFORM_SHORT="ubuntu2204" && \
+    SWIFT_SHA256_AMD64="aaaa32f060838f5c5b476afaadcb8b49170e8d5b24afe9cb9df2e8ce33d4a778" && \
+    SWIFT_SHA256_ARM64="2650ca15c1e23c8644a7dbd36a31420444ab53413aaf18cf001c8b616cac108e" && \
+    if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then \
+        SWIFT_URL_DIR="${SWIFT_PLATFORM_SHORT}-aarch64"; \
+        SWIFT_FILENAME="swift-${SWIFT_VERSION}-RELEASE-${SWIFT_PLATFORM}-aarch64.tar.gz"; \
+        SWIFT_SHA256="$SWIFT_SHA256_ARM64"; \
+    else \
+        SWIFT_URL_DIR="${SWIFT_PLATFORM_SHORT}"; \
+        SWIFT_FILENAME="swift-${SWIFT_VERSION}-RELEASE-${SWIFT_PLATFORM}.tar.gz"; \
+        SWIFT_SHA256="$SWIFT_SHA256_AMD64"; \
+    fi && \
+    curl -fsSL -o swift.tar.gz "https://download.swift.org/swift-${SWIFT_VERSION}-release/${SWIFT_URL_DIR}/swift-${SWIFT_VERSION}-RELEASE/${SWIFT_FILENAME}" && \
+    echo "${SWIFT_SHA256}  swift.tar.gz" | sha256sum -c - && \
+    tar -xzf swift.tar.gz --strip-components=2 -C /usr/local && \
+    rm swift.tar.gz
+RUN apt-get update && apt-get install -y binutils clang libncurses-dev libedit-dev libsqlite3-dev libz3-dev && apt-get clean
+ENV PATH="/usr/local/bin:$PATH"
+# Install Swift development tools
+USER claude
+RUN git clone --depth 1 https://github.com/realm/SwiftLint.git /tmp/swiftlint && \
+    cd /tmp/swiftlint && swift build -c release && \
+    cp .build/release/swiftlint /home/claude/.local/bin/ && \
+    rm -rf /tmp/swiftlint
+RUN git clone --depth 1 https://github.com/nicklockwood/SwiftFormat.git /tmp/swiftformat && \
+    cd /tmp/swiftformat && swift build -c release && \
+    cp .build/release/swiftformat /home/claude/.local/bin/ && \
+    rm -rf /tmp/swiftformat
+USER root
+EOF
+}
+
+export -f _read_ini get_profile_packages get_profile_description get_profile_domains get_all_profile_names profile_exists expand_profile
 export -f get_profile_file_path read_config_value read_profile_section update_profile_section get_current_profiles
 export -f get_profile_core get_profile_build_tools get_profile_shell get_profile_networking get_profile_c get_profile_openwrt
 export -f get_profile_rust get_profile_python get_profile_go get_profile_flutter get_profile_javascript get_profile_java get_profile_ruby
 export -f get_profile_php get_profile_database get_profile_devops get_profile_web get_profile_embedded get_profile_datascience
-export -f get_profile_security get_profile_ml get_profile_bash
+export -f get_profile_security get_profile_ml get_profile_bash get_profile_apple
