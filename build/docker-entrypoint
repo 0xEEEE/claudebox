@@ -60,6 +60,10 @@ fi
 # Seed Claude CLI binary on first run (persistent mount starts empty)
 CLAUDE_BIN="/home/DOCKERUSER/.local/bin/claude"
 CLAUDE_IMAGE_BIN="/usr/local/lib/claudebox/claude-bin"
+if [ -L "$CLAUDE_BIN" ] && [ ! -e "$CLAUDE_BIN" ]; then
+    # Remove dangling symlink left by previous claude update
+    rm -f "$CLAUDE_BIN"
+fi
 if [ ! -f "$CLAUDE_BIN" ] && [ -f "$CLAUDE_IMAGE_BIN" ]; then
     run_as_user cp "$CLAUDE_IMAGE_BIN" "$CLAUDE_BIN"
     run_as_user chmod +x "$CLAUDE_BIN"
@@ -521,6 +525,29 @@ if [ "${CLAUDEBOX_HOST_SKILLS:-false}" = "true" ] && [ -d "/mnt/host-skills" ]; 
         fi
     }
 
+    # Resolve a host skill entry to a container-accessible path
+    # Handles dangling symlinks from host (e.g., ~/.claude/skills/x -> ~/.agents/skills/x)
+    # by looking up the basename in /.agents/skills/ (mounted from host)
+    resolve_host_skill() {
+        local skill="$1"
+        # Regular file or valid symlink — use directly
+        if [ -e "$skill" ]; then
+            printf '%s' "$skill"
+            return 0
+        fi
+        # Dangling symlink — try to resolve via /.agents/skills/
+        if [ -L "$skill" ] && [ -d "/.agents/skills" ]; then
+            local skill_name
+            skill_name=$(basename "$skill")
+            local agents_path="/.agents/skills/$skill_name"
+            if [ -e "$agents_path" ]; then
+                printf '%s' "$agents_path"
+                return 0
+            fi
+        fi
+        return 1
+    }
+
     # Clean up stale symlinks from previous container runs
     for link in /home/DOCKERUSER/.claude/skills/*; do
         [ -L "$link" ] || continue
@@ -543,11 +570,13 @@ if [ "${CLAUDEBOX_HOST_SKILLS:-false}" = "true" ] && [ -d "/mnt/host-skills" ]; 
 
     # Then link host skills (lower priority - skips existing)
     # Skills can be directories or .md files
+    # Also handles dangling symlinks from host (resolved via /.agents/skills/)
     for skill in /mnt/host-skills/*; do
-        [ -e "$skill" ] || continue
+        [ -e "$skill" ] || [ -L "$skill" ] || continue
+        resolved=$(resolve_host_skill "$skill") || continue
         skill_name=$(basename "$skill")
         target="/home/DOCKERUSER/.claude/skills/$skill_name"
-        create_symlink_safe "$skill" "$target"
+        create_symlink_safe "$resolved" "$target"
     done
 
     # Start background inotify watcher for real-time skills updates
@@ -580,8 +609,17 @@ if [ "${CLAUDEBOX_HOST_SKILLS:-false}" = "true" ] && [ -d "/mnt/host-skills" ]; 
                             run_as_user ln -sf "$dir$name" "$target" 2>/dev/null || true
                         else
                             # Host skills: only create if not exists (lower priority)
+                            # Resolve dangling symlinks via /.agents/skills/
                             if [ ! -e "$target" ] && [ ! -L "$target" ]; then
-                                run_as_user ln -s "$dir$name" "$target" 2>/dev/null || true
+                                resolved="${dir}${name}"
+                                if [ ! -e "$resolved" ] && [ -L "$resolved" ] && [ -d "/.agents/skills" ]; then
+                                    if [ -e "/.agents/skills/$name" ]; then
+                                        resolved="/.agents/skills/$name"
+                                    fi
+                                fi
+                                if [ -e "$resolved" ]; then
+                                    run_as_user ln -s "$resolved" "$target" 2>/dev/null || true
+                                fi
                             fi
                         fi
                         ;;
